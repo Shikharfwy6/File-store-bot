@@ -1,11 +1,12 @@
 import os
 import secrets
+import string
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# --- CONFIGURATION (Testing Ke Liye Credentials Yahan Dalein) ---
+# --- CONFIGURATION ---
 API_ID = 33038589          # Apna API ID dalein
 API_HASH = "3a0926df33e0ada07f5f9ccb6ce8c1a3" # Apna API Hash dalein
 BOT_TOKEN = "8819160503:AAGQ8f23z3EuXyDPRRJ8vohw1fW1WtQNXQc" # Apna Bot Token dalein
@@ -20,13 +21,14 @@ db = db_client["FileStoreDB"]
 users_col = db["users"]
 files_col = db["files"]
 
-# Temporary state tracking for users
 user_states = {} 
-BOT_USERNAME = "" # Bot start hote hi dynamic load hoga
+BOT_USERNAME = "" 
 
-# --- HELPER FUNCTIONS ---
+# --- FIXED HELPER FUNCTION (No Underscores, Safe Alphanumeric) ---
 def generate_code():
-    return secrets.token_urlsafe(12)
+    # Yeh hamesha 12 characters ka pure letters aur numbers ka code banayega, koi '_' nahi aayega
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(12))
 
 async def show_main_menu(client, message, user_id, is_callback=False):
     text = "📂 **Main Menu**\n\nNiche diye gaye buttons ka use karein:"
@@ -36,13 +38,10 @@ async def show_main_menu(client, message, user_id, is_callback=False):
          InlineKeyboardButton("📦 Upload Bulk File", callback_data="upload_bulk")],
         [InlineKeyboardButton("❌ Delete Account", callback_data="delete_confirm")]
     ])
-    
     if is_callback:
-        # Fixed: `edit_text` ka use kiya Pyrogram ke liye
         await message.edit_text(text, reply_markup=buttons)
     else:
         await message.reply_text(text, reply_markup=buttons)
-
 
 # --- COMMAND HANDLERS ---
 
@@ -51,9 +50,12 @@ async def start_handler(client, message):
     user_id = message.from_user.id
     text_args = message.text.split()
     
-    # 1. Deep Linking Check (Agar user link se aaya hai)
+    # Deep Linking Parsing (Link handle karna)
     if len(text_args) > 1:
-        code = text_args[1]
+        raw_code = text_args[1]
+        code = raw_code.strip() # Kisi bhi extra space ko hatane ke liye
+        
+        # Database me code check karna
         file_data = await files_col.find_one({"code": code})
         
         if not file_data:
@@ -61,7 +63,9 @@ async def start_handler(client, message):
             return
             
         file_ids = file_data["file_ids"]
-        await message.reply_text(f"📦 Aapki files send ki jaa rahi hain... (Total: {len(file_ids)})")
+        next_part_code = file_data.get("next_part", None)
+        
+        await message.reply_text(f"📦 Aapki files send ki jaa rahi hain... (Is Part Me: {len(file_ids)})")
         
         for f_id in file_ids:
             try:
@@ -70,24 +74,27 @@ async def start_handler(client, message):
                     from_chat_id=CHANNEL_ID,
                     message_id=int(f_id)
                 )
-                await asyncio.sleep(0.5) # Anti-flood delay (Crash protection)
+                await asyncio.sleep(0.6) # Anti-flood delay to prevent crash
             except Exception as e:
                 print(f"Error forwarding file: {e}")
+                
+        # Bulk File Split Integration
+        if next_part_code:
+            next_link = f"https://t.me/{BOT_USERNAME}?start={next_part_code}"
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("⏩ Get Next Part Files", url=next_link)]])
+            await message.reply_text("✨ Is part ki 50 files complete ho gayi hain. Agla part lene ke liye niche click karein 👇", reply_markup=markup)
+        else:
+            await message.reply_text("✅ Sari files successfully deliver ho chuki hain!")
         return
 
-    # 2. Normal /start
+    # Normal /start
     user = await users_col.find_one({"user_id": user_id})
-    
     if not user:
         text = "👋 Welcome! Is bot me files store karne ke liye aapko account create karna hoga."
-        reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Create Account", callback_data="create_account")]
-        ])
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("📝 Create Account", callback_data="create_account")]])
         if START_IMAGE:
-            try:
-                await message.reply_photo(photo=START_IMAGE, caption=text, reply_markup=reply_markup)
-            except Exception:
-                await message.reply_text(text=text, reply_markup=reply_markup)
+            try: await message.reply_photo(photo=START_IMAGE, caption=text, reply_markup=reply_markup)
+            except Exception: await message.reply_text(text=text, reply_markup=reply_markup)
         else:
             await message.reply_text(text=text, reply_markup=reply_markup)
     else:
@@ -101,8 +108,6 @@ async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     message = callback_query.message
-
-    # Buttons freeze hone se bachane ke liye pehle hi answer trigger kiya
     await callback_query.answer()
 
     if data == "create_account":
@@ -129,7 +134,7 @@ async def callback_handler(client, callback_query):
     elif data == "upload_single":
         user_states[user_id] = {"state": "waiting_single"}
         await message.edit_text(
-            "📥 **Single File Mode:**\nAb koi bhi file/video/image forward ya upload karein. Link turant ban jayega.",
+            "📥 **Single File Mode:**\nAb koi bhi file forward/upload karein. Link turant ban jayega.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
 
@@ -145,17 +150,15 @@ async def callback_handler(client, callback_query):
             [InlineKeyboardButton("✅ Haan, Delete Karo", callback_data="delete_account_final")],
             [InlineKeyboardButton("❌ Nahi, Cancel", callback_data="back_to_menu")]
         ])
-        await message.edit_text("⚠️ **Kya aap sach me apna account aur saara data delete karna chahte hain?**", reply_markup=buttons)
+        await message.edit_text("⚠️ **Kya aap sach me apna account aur data delete karna chahte hain?**", reply_markup=buttons)
 
     elif data == "delete_account_final":
         await users_col.delete_one({"user_id": user_id})
-        if user_id in user_states:
-            del user_states[user_id]
-        await message.edit_text("🗑️ Aapka account completely delete ho chuka hai. Dobara judne ke liye `/start` karein.")
+        if user_id in user_states: del user_states[user_id]
+        await message.edit_text("🗑️ Aapka account delete ho chuka hai. Dobara judne ke liye `/start` karein.")
 
     elif data == "back_to_menu":
-        if user_id in user_states:
-            del user_states[user_id]
+        if user_id in user_states: del user_states[user_id]
         await show_main_menu(client, message, user_id, is_callback=True)
 
 
@@ -166,29 +169,39 @@ async def bulk_end_handler(client, message):
     user_id = message.from_user.id
     
     if user_id not in user_states or user_states[user_id]["state"] != "waiting_bulk":
-        await message.reply_text("❌ Aap bulk upload mode me nahi hain. Pehle menu se select karein.")
+        await message.reply_text("❌ Aap bulk upload mode me nahi hain.")
         return
         
-    file_ids = user_states[user_id]["bulk_files"]
-    if not file_ids:
-        await message.reply_text("⚠️ Aapne koi file upload nahi ki. Cancel karne ke liye menu par jayein.")
+    all_files = user_states[user_id]["bulk_files"]
+    if not all_files:
+        await message.reply_text("⚠️ Aapne koi file upload nahi ki.")
         return
         
-    status_msg = await message.reply_text("⏳ Processing aur link generate kiya jaa rha hai...")
+    status_msg = await message.reply_text("⏳ Processing aur split links generate kiye jaa rhe hain...")
     
-    code = generate_code()
-    share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
-    
-    # Store in Files Database
-    await files_col.insert_one({"code": code, "file_ids": file_ids})
-    # User Database array me push karna
-    await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
-    
+    # 50-50 files chunk logic
+    chunks = [all_files[i:i + 50] for i in range(0, len(all_files), 50)]
+    previous_code = None
+    first_share_link = ""
+
+    for idx, chunk in enumerate(reversed(chunks)):
+        code = generate_code()
+        doc = {"code": code, "file_ids": chunk}
+        if previous_code:
+            doc["next_part"] = previous_code
+        
+        await files_col.insert_one(doc)
+        previous_code = code
+        
+        if idx == len(chunks) - 1:
+            first_share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
+
+    await users_col.update_one({"user_id": user_id}, {"$push": {"links": first_share_link}})
     del user_states[user_id]
     
     await status_msg.delete()
     await message.reply_text(
-        f"✅ **Bulk Link Generated Successfully!**\n\n🔗 **Link:** {share_link}",
+        f"✅ **Bulk Link Generated! (Total Parts: {len(chunks)})**\n\n🔗 **Main Link:** {first_share_link}\n\n*Note: Is link se user ko pehle 50 files milengi, fir wahan 'Next Part' ka button automatic aa jayega.*",
         disable_web_page_preview=True
     )
     await show_main_menu(client, message, user_id)
@@ -203,7 +216,7 @@ async def file_receiver_handler(client, message):
         return
 
     if user_id not in user_states:
-        await message.reply_text("⚠️ Pehle menu se 'Single File' ya 'Bulk File' option select karein.")
+        await message.reply_text("⚠️ Pehle menu se selection karein.")
         return
         
     state_data = user_states[user_id]
@@ -212,46 +225,36 @@ async def file_receiver_handler(client, message):
         forwarded = await message.forward(CHANNEL_ID)
         file_id = forwarded.id
     except Exception as e:
-        await message.reply_text(f"❌ File channel me forward nahi ho payi. Error: {e}")
+        await message.reply_text(f"❌ File channel me nahi gayi. Error: {e}")
         return
 
-    # Single Mode Handling
     if state_data["state"] == "waiting_single":
         code = generate_code()
         share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
-        
         await files_col.insert_one({"code": code, "file_ids": [file_id]})
         await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
-        
         del user_states[user_id]
-        
-        await message.reply_text(
-            f"✅ **Single File Link Ready:**\n\n🔗 {share_link}",
-            disable_web_page_preview=True
-        )
+        await message.reply_text(f"✅ **Single File Link Ready:**\n\n🔗 {share_link}", disable_web_page_preview=True)
         await show_main_menu(client, message, user_id)
 
-    # Bulk Mode Handling (Crash Proofing)
     elif state_data["state"] == "waiting_bulk":
         state_data["bulk_files"].append(file_id)
         current_count = len(state_data["bulk_files"])
         
         if current_count % 50 == 0:
-            await message.reply_text(
-                f"📥 **50 Files Complete!**\nAgla part ready hai. Aur files bhejna jari rakhein, ya link ke liye `/end` dabayein."
-            )
+            await message.reply_text(f"📥 **{current_count} Files Receive Ho Chuki Hain!**\nYeh Part 50 complete ho gaya hai, aap bli files bhejna jaari rakh sakte hain. Khatam karne ke liye `/end` dabayein.")
         else:
             await message.reply_text(f"📥 File received ({current_count}). Aur bhejein ya `/end` karein.")
 
 
-# --- ASYNC RUN LOOP ---
+# --- MAIN ENGINE ---
 async def main():
     global BOT_USERNAME
     print("Bot starting...")
     await bot.start()
     bot_info = await bot.get_me()
     BOT_USERNAME = bot_info.username
-    print(f"✨ Bot successfully running on @{BOT_USERNAME}!")
+    print(f"✨ Bot is live on @{BOT_USERNAME}!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
