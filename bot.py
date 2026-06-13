@@ -5,7 +5,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# --- CONFIGURATION (Testing Ke Liye) ---
+# --- CONFIGURATION (Testing Ke Liye Credentials Yahan Dalein) ---
 API_ID = 33038589          # Apna API ID dalein
 API_HASH = "3a0926df33e0ada07f5f9ccb6ce8c1a3" # Apna API Hash dalein
 BOT_TOKEN = "8819160503:AAGQ8f23z3EuXyDPRRJ8vohw1fW1WtQNXQc" # Apna Bot Token dalein
@@ -38,9 +38,11 @@ async def show_main_menu(client, message, user_id, is_callback=False):
     ])
     
     if is_callback:
-        await message.edit_message_text(text, reply_markup=buttons)
+        # Fixed: `edit_text` ka use kiya Pyrogram ke liye
+        await message.edit_text(text, reply_markup=buttons)
     else:
         await message.reply_text(text, reply_markup=buttons)
+
 
 # --- COMMAND HANDLERS ---
 
@@ -68,7 +70,7 @@ async def start_handler(client, message):
                     from_chat_id=CHANNEL_ID,
                     message_id=int(f_id)
                 )
-                await asyncio.sleep(0.5) # Anti-flood delay
+                await asyncio.sleep(0.5) # Anti-flood delay (Crash protection)
             except Exception as e:
                 print(f"Error forwarding file: {e}")
         return
@@ -100,7 +102,7 @@ async def callback_handler(client, callback_query):
     data = callback_query.data
     message = callback_query.message
 
-    # Freeze effect hatane ke liye pehle hi answer kar dete hain
+    # Buttons freeze hone se bachane ke liye pehle hi answer trigger kiya
     await callback_query.answer()
 
     if data == "create_account":
@@ -114,7 +116,7 @@ async def callback_handler(client, callback_query):
         user = await users_col.find_one({"user_id": user_id})
         if not user or not user.get("links") or len(user["links"]) == 0:
             back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]])
-            await message.edit_message_text("⚠️ Aapne abhi tak koi link nahi banaya.", reply_markup=back_button)
+            await message.edit_text("⚠️ Aapne abhi tak koi link nahi banaya.", reply_markup=back_button)
             return
         
         links_text = "🔗 **Aapke Saved Links:**\n\n"
@@ -122,18 +124,18 @@ async def callback_handler(client, callback_query):
             links_text += f"{idx}. {link}\n"
         
         back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]])
-        await message.edit_message_text(links_text, reply_markup=back_button, disable_web_page_preview=True)
+        await message.edit_text(links_text, reply_markup=back_button, disable_web_page_preview=True)
 
     elif data == "upload_single":
         user_states[user_id] = {"state": "waiting_single"}
-        await message.edit_message_text(
+        await message.edit_text(
             "📥 **Single File Mode:**\nAb koi bhi file/video/image forward ya upload karein. Link turant ban jayega.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
 
     elif data == "upload_bulk":
         user_states[user_id] = {"state": "waiting_bulk", "bulk_files": []}
-        await message.edit_message_text(
+        await message.edit_text(
             "📦 **Bulk File Mode:**\nSari files ek-ek karke bhejein. Jab sab upload ho jayein, tab `/end` command bhejein.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
@@ -143,13 +145,13 @@ async def callback_handler(client, callback_query):
             [InlineKeyboardButton("✅ Haan, Delete Karo", callback_data="delete_account_final")],
             [InlineKeyboardButton("❌ Nahi, Cancel", callback_data="back_to_menu")]
         ])
-        await message.edit_message_text("⚠️ **Kya aap sach me apna account aur saara data delete karna chahte hain?**", reply_markup=buttons)
+        await message.edit_text("⚠️ **Kya aap sach me apna account aur saara data delete karna chahte hain?**", reply_markup=buttons)
 
     elif data == "delete_account_final":
         await users_col.delete_one({"user_id": user_id})
         if user_id in user_states:
             del user_states[user_id]
-        await message.edit_message_text("🗑️ Aapka account completely delete ho chuka hai. Dobara judne ke liye `/start` karein.")
+        await message.edit_text("🗑️ Aapka account completely delete ho chuka hai. Dobara judne ke liye `/start` karein.")
 
     elif data == "back_to_menu":
         if user_id in user_states:
@@ -177,8 +179,9 @@ async def bulk_end_handler(client, message):
     code = generate_code()
     share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
     
-    # Store in DB
+    # Store in Files Database
     await files_col.insert_one({"code": code, "file_ids": file_ids})
+    # User Database array me push karna
     await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
     
     del user_states[user_id]
@@ -212,6 +215,7 @@ async def file_receiver_handler(client, message):
         await message.reply_text(f"❌ File channel me forward nahi ho payi. Error: {e}")
         return
 
+    # Single Mode Handling
     if state_data["state"] == "waiting_single":
         code = generate_code()
         share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
@@ -227,6 +231,7 @@ async def file_receiver_handler(client, message):
         )
         await show_main_menu(client, message, user_id)
 
+    # Bulk Mode Handling (Crash Proofing)
     elif state_data["state"] == "waiting_bulk":
         state_data["bulk_files"].append(file_id)
         current_count = len(state_data["bulk_files"])
@@ -238,14 +243,15 @@ async def file_receiver_handler(client, message):
         else:
             await message.reply_text(f"📥 File received ({current_count}). Aur bhejein ya `/end` karein.")
 
-# Dynamic Username Fetching on Start
+
+# --- ASYNC RUN LOOP ---
 async def main():
     global BOT_USERNAME
     print("Bot starting...")
     await bot.start()
     bot_info = await bot.get_me()
     BOT_USERNAME = bot_info.username
-    print(f"Bot successfully running on @{BOT_USERNAME}")
+    print(f"✨ Bot successfully running on @{BOT_USERNAME}!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
