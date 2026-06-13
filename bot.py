@@ -159,7 +159,7 @@ async def callback_handler(client, callback_query):
 
 # --- TEXT & FILE HANDLERS ---
 
-@bot.on_message(filters.private & /filters.command("end"))
+@bot.on_message(filters.private & filters.command("end"))
 async def bulk_end_handler(client, message):
     user_id = message.from_user.id
     
