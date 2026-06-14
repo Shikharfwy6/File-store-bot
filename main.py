@@ -14,6 +14,11 @@ import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, CommandHandler, filters, ContextTypes
 
+# --- VERCEL CRITICAL ENTRYPOINT FIX ---
+# Naye Vercel CLI ke liye 'app' aur 'application' ka sabse upar hona zaroori hai
+app = Flask(__name__)
+application = app
+
 # --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, stream=sys.stdout)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -31,12 +36,13 @@ LOG_GROUP_ID = int(os.environ.get("LOG_GROUP_ID", -5408786306))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@Cources99")  
 OWNER_ID = int(os.environ.get("OWNER_ID", 7559016251))         
 
-BOT_USERNAME = "free_file_store2026_bot" # Yahan apne bot ka username bina @ ke likhein
+# Aapka diya hua bot username (bina @ ke)
+BOT_USERNAME = "free_file_store2026_bot" 
 
 ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
 if not BOT_TOKEN or not DB_URI:
-    print("💥 Critical Error: BOT_TOKEN ya DB_URI missing hai!", flush=True)
+    print("💥 Critical Error: BOT_TOKEN ya DB_URI environment variables missing hain!", flush=True)
     sys.exit(1)
 
 # --- DATABASE SETUP ---
@@ -53,8 +59,7 @@ except Exception as e:
 user_states = {} 
 session = requests.Session()
 
-# --- INITIALIZE FLASK & PTB APPLICATION ---
-app = Flask(__name__)
+# --- INITIALIZE PTB APPLICATION ---
 ptb_app = Application.builder().token(BOT_TOKEN).build()
 ptb_app.bot._username = BOT_USERNAME
 ptb_app.bot._bot_user = telegram.User(id=int(BOT_TOKEN.split(':')[0]), is_bot=True, first_name="FileStore", username=BOT_USERNAME)
@@ -207,7 +212,9 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
                         if ADMIN_EARNING_API:
                             final_short_url = get_shortened_url(ADMIN_EARNING_API, final_short_url)
                         
-                        await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+                        try: await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+                        except: pass
+
                         if not (final_short_url.startswith("http://") or final_short_url.startswith("https://")):
                             final_short_url = base_verify_url
                             
@@ -282,7 +289,8 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if idx == len(chunks) - 1: first_share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
             users_col.update_one({"user_id": user_id}, {"$push": {"links": first_share_link}})
             del user_states[user_id]
-            await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            try: await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except: pass
             await update.message.reply_text(f"✅ **Link:** {first_share_link}", disable_web_page_preview=True)
             await show_main_menu(bot, chat_id)
         return
@@ -368,7 +376,7 @@ ptb_app.add_handler(CallbackQueryHandler(callback_handler))
 # --- FLASK WEBHOOK SYSTEM ---
 @app.route('/', methods=['GET'])
 def index():
-    return "Bot is active via Flask & python-telegram-bot Webhook!", 200
+    return "Bot Engine is Perfectly Running via New Vercel Rewrites Router!", 200
 
 @app.route('/webhook', methods=['POST'])
 def telegram_webhook():
@@ -391,9 +399,6 @@ def telegram_webhook():
             print(f"💥 Webhook Process Error: {e}", flush=True)
             return jsonify({"status": "error"}), 200
     return "Method Not Allowed", 400
-
-# Entrypoint for Vercel
-app = app
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=7860)
