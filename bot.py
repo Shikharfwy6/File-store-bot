@@ -16,7 +16,7 @@ BOT_USERNAME = "free_file_store2026_bot_bot" # Bot ka username (bina @ ke)
 START_IMAGE = "https://i.postimg.cc/jdcrNdQq/images-2026-06-13T195118-621.jpg" # /start par jo image dikhani hai
 
 # Log Group, Admin aur Owner Configuration
-LOG_GROUP_ID = -5408786306     # Aapka group ID jahan notification jayega
+LOG_GROUP_ID = -1005408786306     # Aapka group ID jahan notification jayega
 ADMIN_USERNAME = "@Cources99"  # Contact username unverified users ke liye
 OWNER_ID = 7559016251         # CRITICAL: Srif yeh ID hi users ko verify kar sakti hai
 
