@@ -2,6 +2,8 @@ import os
 import secrets
 import string
 import asyncio
+from datetime import datetime, timedelta, time
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -15,10 +17,9 @@ CHANNEL_ID = -1003700429012   # Apna DB/Log Channel ID dalein
 BOT_USERNAME = "free_file_store2026_bot_bot" # Bot ka username (bina @ ke)
 START_IMAGE = "https://i.postimg.cc/jdcrNdQq/images-2026-06-13T195118-621.jpg" # /start par jo image dikhani hai
 
-# Log Group, Admin aur Owner Configuration
-LOG_GROUP_ID = -5408786306     # Aapka group ID jahan notification jayega
-ADMIN_USERNAME = "@Cources99"  # Contact username unverified users ke liye
-OWNER_ID = 7559016251         # CRITICAL: Srif yeh ID hi users ko verify kar sakti hai
+LOG_GROUP_ID = -5408786306     
+ADMIN_USERNAME = "@Cources99"  
+OWNER_ID = 7559016251         
 
 # --- INITIALIZATION ---
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -30,10 +31,44 @@ files_col = db["files"]
 user_states = {} 
 BOT_USERNAME = "" 
 
-# --- HELPER FUNCTION (Safe Alphanumeric Code) ---
+# --- HELPER FUNCTIONS ---
 def generate_code():
     chars = string.ascii_letters + string.digits
     return "".join(secrets.choice(chars) for _ in range(12))
+
+def get_tonight_expiry():
+    """Calculates midnight (23:59:59) of current day in IST/Local"""
+    # Agar aapka server India ke timezone (IST) me nahi hai, to timedelta use karein.
+    # Yeh code server ke local time ke hisab se raat ke 11:59:59 PM ka timestamp nikalega.
+    now = datetime.now()
+    midnight = datetime.combine(now.date(), time(23, 59, 59))
+    return midnight
+
+async def get_shortened_url(api_url, long_url):
+    """Dynamically handles general shortener API requests"""
+    try:
+        # standard shortener formats (api?api=TOKEN&url=LINK or similar)
+        # Hum generic format follow kar rahe hain, aap apne shortener ke exact format ke hisab se modify kar sakte hain
+        clean_api = api_url.strip()
+        connector = "&" if "?" in clean_api else "?"
+        final_api_call = f"{clean_api}{connector}url={long_url}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(final_api_call, timeout=10) as response:
+                if response.status == 200:
+                    res_json = await response.json()
+                    if "shortenedUrl" in res_json:
+                        return res_json["shortenedUrl"]
+                    elif "shortlink" in res_json:
+                        return res_json["shortlink"]
+                    elif "link" in res_json:
+                        return res_json["link"]
+                    elif res_json.get("status") == "success":
+                        return res_json.get("shortenedUrl") or res_json.get("link")
+        return long_url
+    except Exception as e:
+        print(f"Shortener API Error: {e}")
+        return long_url
 
 async def show_main_menu(client, message, user_id, is_callback=False):
     text = "📂 **Main Menu**\n\nNiche diye gaye buttons ka use karein:"
@@ -56,16 +91,113 @@ async def start_handler(client, message):
     user_id = message.from_user.id
     text_args = message.text.split()
     
-    # Deep Linking Handling
+    # 1. Verification Handler Link (?start=verify_XXXX)
+    if len(text_args) > 1 and text_args[1].startswith("verify_"):
+        verify_token = text_args[1]
+        
+        # Pure Database me check karo ki ye verification token kis owner ke kis user ka hai
+        owner_doc = await users_col.find_one({"Users.verify_token": verify_token})
+        
+        if not owner_doc:
+            await message.reply_text("❌ Verification Link Invalid hai ya expire ho chuka hai.")
+            return
+            
+        expiry_time = get_tonight_expiry()
+        
+        # Owner ke user list me specific record ko update karo
+        await users_col.update_one(
+            {"user_id": owner_doc["user_id"], "Users.verify_token": verify_token},
+            {"$set": {
+                "Users.$.status": "verified",
+                "Users.$.expiretime": expiry_time
+            }}
+        )
+        
+        await message.reply_text("✅ **Aap successfully verify ho chuke hain!**\nAb aap owner ke link se file access kar sakte hain. Dubara file link par click karein.")
+        return
+
+    # 2. File / Deep Linking Link Handling
     if len(text_args) > 1:
-        raw_code = text_args[1]
-        code = raw_code.strip()
+        code = text_args[1].strip()
         
         file_data = await files_col.find_one({"code": code})
         if not file_data:
             await message.reply_text("❌ Link invalid hai ya file delete ho chuki hai.")
             return
             
+        file_owner_id = file_data.get("owner_id")
+        
+        # Agar file kisi registered owner ki hai to verification logic check karein
+        if file_owner_id and file_owner_id != user_id:
+            owner_profile = await users_col.find_one({"user_id": file_owner_id})
+            
+            if owner_profile:
+                # Check user inside owner's database array
+                users_array = owner_profile.get("Users", [])
+                target_user = next((u for u in users_array if u["userid"] == user_id), None)
+                
+                now = datetime.now()
+                is_verified = False
+                
+                if target_user:
+                    # Check if already verified and not expired
+                    if target_user.get("status") == "verified":
+                        exp_time = target_user.get("expiretime")
+                        if exp_time and now < exp_time:
+                            is_verified = True
+                        else:
+                            # Auto reset to unverified if expired
+                            await users_col.update_one(
+                                {"user_id": file_owner_id, "Users.userid": user_id},
+                                {"$set": {"Users.$.status": "unverified", "Users.$.verify_token": None}}
+                            )
+                else:
+                    # Agar new user aya hai to default record push karo status: unverified ke sath
+                    new_user_data = {
+                        "userid": user_id,
+                        "status": "unverified",
+                        "expiretime": None,
+                        "verify_token": None
+                    }
+                    await users_col.update_one(
+                        {"user_id": file_owner_id},
+                        {"$push": {"Users": new_user_data}}
+                    )
+                
+                # Agar user verified nahi hai to chain shortener logic trigger karein
+                if not is_verified:
+                    status_msg = await message.reply_text("⏳ **Aapka verification check kiya jaa raha hai...**\nShortener link ready ho raha hai, kripya thoda intezar karein.")
+                    
+                    random_verify_str = f"verify_{generate_code().lower()}"
+                    base_verify_url = f"https://t.me/{BOT_USERNAME}?start={random_verify_str}"
+                    
+                    # Update dynamic verification token for safety match
+                    await users_col.update_one(
+                        {"user_id": file_owner_id, "Users.userid": user_id},
+                        {"$set": {"Users.$.verify_token": random_verify_str}}
+                    )
+                    
+                    # Shorteners Loop Chain Logic (API 1 -> API 2 -> API 3)
+                    owner_apis = owner_profile.get("shorteners", [])
+                    final_short_url = base_verify_url
+                    
+                    if owner_apis:
+                        for api in owner_apis:
+                            final_short_url = await get_shortened_url(api, final_short_url)
+                    
+                    await status_msg.delete()
+                    
+                    verification_button = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔐 Verify Account", url=final_short_url)]
+                    ])
+                    
+                    await message.reply_text(
+                        "⚠️ **Access Denied!**\n\nFile download karne ke liye aapko pehle Owner ke links se verify karna hoga. Yeh verification aaj raat 12 baje tak valid rahega.",
+                        reply_markup=verification_button
+                    )
+                    return
+
+        # Agar User verified hai ya khud Owner hai tab file deliver hogi:
         file_ids = file_data["file_ids"]
         next_part_code = file_data.get("next_part", None)
         
@@ -73,11 +205,7 @@ async def start_handler(client, message):
         
         for f_id in file_ids:
             try:
-                await client.copy_message(
-                    chat_id=user_id,
-                    from_chat_id=CHANNEL_ID,
-                    message_id=int(f_id)
-                )
+                await client.copy_message(chat_id=user_id, from_chat_id=CHANNEL_ID, message_id=int(f_id))
                 await asyncio.sleep(0.6)
             except Exception as e:
                 print(f"Error forwarding file: {e}")
@@ -85,7 +213,7 @@ async def start_handler(client, message):
         if next_part_code:
             next_link = f"https://t.me/{BOT_USERNAME}?start={next_part_code}"
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("⏩ Get Next Part Files", url=next_link)]])
-            await message.reply_text("✨ Is part ki 50 files complete ho gayi hain. Agla part lene ke liye niche click karein 👇", reply_markup=markup)
+            await message.reply_text("✨ Is part ki files complete ho gayi hain. Agla part lene ke liye niche click karein 👇", reply_markup=markup)
         else:
             await message.reply_text("✅ Sari files successfully deliver ho chuki hain!")
         return
@@ -108,9 +236,8 @@ async def start_handler(client, message):
 @bot.on_message(filters.command("a") & filters.private)
 async def verify_user_handler(client, message):
     sender_id = message.from_user.id
-    
     if sender_id != OWNER_ID:
-        await message.reply_text("❌ **Access Denied!** Aap admin/owner nahi hain. Yeh command srif main owner run kar sakta hai.")
+        await message.reply_text("❌ **Access Denied!**")
         return
         
     text_args = message.text.split()
@@ -118,35 +245,17 @@ async def verify_user_handler(client, message):
         await message.reply_text("❌ Sahi format use karein: `/a target_user_id`")
         return
         
-    try:
-        target_id = int(text_args[1])
-    except ValueError:
-        await message.reply_text("❌ Invalid User ID. ID hamesha number hota hai.")
-        return
+    try: target_id = int(text_args[1])
+    except ValueError: return
         
     user = await users_col.find_one({"user_id": target_id})
-    if not user:
-        await message.reply_text("❌ Yeh user database me nahi mila.")
-        return
-        
-    if user.get("status") == "verified":
-        await message.reply_text("⚠️ Yeh user pehle se hi verified hai.")
-        return
+    if not user: return
         
     await users_col.update_one({"user_id": target_id}, {"$set": {"status": "verified"}})
-    await message.reply_text(f"✅ User `{target_id}` ko successfully verify kar diya gaya hai!")
-    
-    try:
-        await client.send_message(
-            chat_id=target_id,
-            text="🎉 **Aapka account admin dwara verify kar diya gaya hai!**\nAb aap files upload kar sakte hain. Main menu dekhne ke liye `/start` karein."
-        )
-    except Exception as e:
-        await message.reply_text(f"⚠️ User verified ho gaya, par use bot block karne ki wajah se message nahi jaa saka: {e}")
+    await message.reply_text(f"✅ User `{target_id}` ko admin status verified kar diya gaya hai!")
 
 
 # --- CALLBACK QUERY HANDLERS ---
-
 @bot.on_callback_query()
 async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
@@ -157,8 +266,8 @@ async def callback_handler(client, callback_query):
     if data == "create_account":
         user = await users_col.find_one({"user_id": user_id})
         if not user:
-            # "shorteners" array bhi pehle se taiyar rakha hai
-            await users_col.insert_one({"user_id": user_id, "links": [], "shorteners": [], "status": "unverified"})
+            # Users list initialized dynamically inside row structure
+            await users_col.insert_one({"user_id": user_id, "links": [], "shorteners": [], "status": "unverified", "Users": []})
             await message.reply_text("🎉 Account successfully ban gaya!")
         await show_main_menu(client, message, user_id, is_callback=False)
 
@@ -179,7 +288,7 @@ async def callback_handler(client, callback_query):
     elif data == "enter_shortener":
         user_states[user_id] = {"state": "waiting_api", "apis": []}
         await message.edit_text(
-            "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link (arolinks, vplink, instantshortner etc.) ek-ek karke send karein.\n\n"
+            "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link ek-ek karke send karein.\n\n"
             "Jab saare API send kar dein, tab save karne ke liye `/end` command bhein.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
@@ -216,12 +325,11 @@ async def callback_handler(client, callback_query):
 
 
 # --- TEXT & FILE HANDLERS / /end HANDLER ---
-
 @bot.on_message(filters.private & filters.command("end"))
 async def end_command_handler(client, message):
     user_id = message.from_user.id
-    
     user = await users_col.find_one({"user_id": user_id})
+    
     if user and user.get("status") == "unverified":
         username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         log_text = f"key user ({username})\nUser id({user_id})\nNa file upload/api upload karan key kosis key"
@@ -233,12 +341,11 @@ async def end_command_handler(client, message):
         return
 
     if user_id not in user_states:
-        await message.reply_text("❌ Aap kisi active mode me nahi hain (Bulk upload ya API mode open karein).")
+        await message.reply_text("❌ Aap kisi active mode me nahi hain.")
         return
         
     state_type = user_states[user_id]["state"]
 
-    # 1. API LINK STORAGE FIX (Saves inside user's main document row)
     if state_type == "waiting_api":
         all_apis = user_states[user_id]["apis"]
         if not all_apis:
@@ -247,21 +354,15 @@ async def end_command_handler(client, message):
             await show_main_menu(client, message, user_id)
             return
             
-        status_msg = await message.reply_text("⏳ Saare APIs ko aapke account row me store kiya jaa raha hai...")
-        
-        # FIX: Pushes all collected apis into the 'shorteners' array of the same user document
-        await users_col.update_one(
-            {"user_id": user_id},
-            {"$push": {"shorteners": {"$each": all_apis}}}
-        )
+        status_msg = await message.reply_text("⏳ Saare APIs ko save kiya jaa raha hai...")
+        await users_col.update_one({"user_id": user_id}, {"$set": {"shorteners": all_apis}})
             
         count = len(all_apis)
         del user_states[user_id]
         await status_msg.delete()
-        await message.reply_text(f"✅ Successfully aapke saare **{count} API links** aapke database me save ho chuke hain!")
+        await message.reply_text(f"✅ Successfully aapke saare **{count} API links** save ho chuke hain!")
         await show_main_menu(client, message, user_id)
 
-    # 2. BULK FILES HANDLER
     elif state_type == "waiting_bulk":
         all_files = user_states[user_id]["bulk_files"]
         if not all_files:
@@ -269,14 +370,14 @@ async def end_command_handler(client, message):
             return
             
         status_msg = await message.reply_text("⏳ Processing aur split links generate kiye jaa rhe hain...")
-        
         chunks = [all_files[i:i + 50] for i in range(0, len(all_files), 50)]
         previous_code = None
         first_share_link = ""
 
         for idx, chunk in enumerate(reversed(chunks)):
             code = generate_code()
-            doc = {"code": code, "file_ids": chunk}
+            # CRITICAL FIX: Adding owner_id mapping inside file document logic row
+            doc = {"code": code, "file_ids": chunk, "owner_id": user_id}
             if previous_code:
                 doc["next_part"] = previous_code
             
@@ -290,79 +391,59 @@ async def end_command_handler(client, message):
         del user_states[user_id]
         
         await status_msg.delete()
-        await message.reply_text(
-            f"✅ **Bulk Link Generated!**\n\n🔗 **Main Link:** {first_share_link}",
-            disable_web_page_preview=True
-        )
+        await message.reply_text(f"✅ **Bulk Link Generated!**\n\n🔗 **Main Link:** {first_share_link}", disable_web_page_preview=True)
         await show_main_menu(client, message, user_id)
 
 
-# --- GENERAL TEXT CAPTURE HANDLER (For Shortener Links) ---
+# --- GENERAL TEXT CAPTURE HANDLER ---
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "end", "a"]))
 async def text_handler(client, message):
     user_id = message.from_user.id
-    
-    if user_id not in user_states:
-        await message.reply_text("⚠️ Pehle menu se selection karein.")
-        return
+    if user_id not in user_states: return
         
     if user_states[user_id]["state"] == "waiting_api":
         api_text = message.text.strip()
-        
         if not (api_text.startswith("http://") or api_text.startswith("https://")):
-            await message.reply_text("❌ Galat format! Kripya valid full shortener API URL send karein.")
+            await message.reply_text("❌ Galat format!")
             return
             
         user_states[user_id]["apis"].append(api_text)
         current_count = len(user_states[user_id]["apis"])
-        
-        await message.reply_text(
-            f"📥 **API Link Received ({current_count})!**\n\n"
-            f"Agla API link bhejein ya sab complete hone par `/end` send karein."
-        )
+        await message.reply_text(f"📥 **API Link Received ({current_count})!**\nAgla link bhejein ya `/end` karein.")
 
 
 # --- FILE RECEIVER HANDLER ---
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo | filters.animation))
 async def file_receiver_handler(client, message):
     user_id = message.from_user.id
-    
     user = await users_col.find_one({"user_id": user_id})
-    if not user:
-        await message.reply_text("⚠️ Pehle `/start` karke account create karein.")
-        return
+    if not user: return
 
-    # UNVERIFIED USERS LOCK
     if user.get("status") == "unverified":
         username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         log_text = f"key user ({username})\nUser id({user_id})\nNa file upload karan key kosis key"
         try: await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
-        except Exception as e: print(f"Log Group Notification Error: {e}")
-            
+        except Exception: pass
         await message.reply_text(f"❌ you need to connect admin for approval \nUsername ho {ADMIN_USERNAME}")
-        if user_id in user_states: del user_states[user_id]
         return
 
-    if user_id not in user_states:
-        await message.reply_text("⚠️ Pehle menu se selection karein.")
-        return
-        
+    if user_id not in user_states: return
     state_data = user_states[user_id]
-    if state_data["state"] not in ["waiting_single", "waiting_bulk"]:
-        await message.reply_text("⚠️ Bot abhi file receive karne ki state me nahi hai.")
-        return
         
     try:
         forwarded = await message.forward(CHANNEL_ID)
         file_id = forwarded.id
     except Exception as e:
-        await message.reply_text(f"❌ File channel me nahi gayi. Error: {e}")
+        await message.reply_text(f"❌ Error: {e}")
         return
 
     if state_data["state"] == "waiting_single":
         code = generate_code()
         share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
-        await files_col.insert_one({"code": code, "file_ids": [file_id]})
+        
+        # CRITICAL FIX: Adding owner_id mapping here too
+        await files_col.insert_one({"code": code, "file_ids": [file_id], "owner_id": user_id})
+        
         await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
         del user_states[user_id]
         await message.reply_text(f"✅ **Single File Link Ready:**\n\n🔗 {share_link}", disable_web_page_preview=True)
@@ -371,11 +452,10 @@ async def file_receiver_handler(client, message):
     elif state_data["state"] == "waiting_bulk":
         state_data["bulk_files"].append(file_id)
         current_count = len(state_data["bulk_files"])
-        
         if current_count % 50 == 0:
-            await message.reply_text(f"📥 **{current_count} Files Receive Ho Chuki Hain!**\nKhatam karne ke liye `/end` dabayein.")
+            await message.reply_text(f"📥 **{current_count} Files Receive!**\nKhatam karne ke liye `/end` dabayein.")
         else:
-            await message.reply_text(f"📥 File received ({current_count}). Aur bhejein ya `/end` karein.")
+            await message.reply_text(f"📥 File received ({current_count}).")
 
 
 # --- MAIN ENGINE ---
