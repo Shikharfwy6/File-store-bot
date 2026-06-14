@@ -15,7 +15,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, CommandHandler, filters, ContextTypes
 
 # --- VERCEL CRITICAL ENTRYPOINT FIX ---
-# Naye Vercel CLI ke liye 'app' aur 'application' ka sabse upar hona zaroori hai
 app = Flask(__name__)
 application = app
 
@@ -41,28 +40,33 @@ BOT_USERNAME = "free_file_store2026_bot"
 
 ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
-if not BOT_TOKEN or not DB_URI:
-    print("💥 Critical Error: BOT_TOKEN ya DB_URI environment variables missing hain!", flush=True)
-    sys.exit(1)
-
 # --- DATABASE SETUP ---
 try:
-    mongo_client = MongoClient(DB_URI, maxPoolSize=5, minPoolSize=1, waitQueueTimeoutMS=2000, retryWrites=True)
-    db = mongo_client["FileStoreDB"]
-    users_col = db["users"]
-    files_col = db["files"]
-    print("✅ MongoDB Connected Successfully!", flush=True)
+    # Vercel Build block na ho isliye DB_URI check logic ko handle kiya
+    if DB_URI:
+        mongo_client = MongoClient(DB_URI, maxPoolSize=5, minPoolSize=1, waitQueueTimeoutMS=2000, retryWrites=True)
+        db = mongo_client["FileStoreDB"]
+        users_col = db["users"]
+        files_col = db["files"]
+        print("✅ MongoDB Connected Successfully!", flush=True)
+    else:
+        print("⚠️ Warning: DB_URI is missing (This is normal during Vercel Build stage)", flush=True)
+        users_col = None
+        files_col = None
 except Exception as e:
     print(f"💥 MongoDB Connection Error: {e}", flush=True)
-    sys.exit(1)
 
 user_states = {} 
 session = requests.Session()
 
 # --- INITIALIZE PTB APPLICATION ---
-ptb_app = Application.builder().token(BOT_TOKEN).build()
-ptb_app.bot._username = BOT_USERNAME
-ptb_app.bot._bot_user = telegram.User(id=int(BOT_TOKEN.split(':')[0]), is_bot=True, first_name="FileStore", username=BOT_USERNAME)
+if BOT_TOKEN:
+    ptb_app = Application.builder().token(BOT_TOKEN).build()
+    ptb_app.bot._username = BOT_USERNAME
+    ptb_app.bot._bot_user = telegram.User(id=int(BOT_TOKEN.split(':')[0]), is_bot=True, first_name="FileStore", username=BOT_USERNAME)
+else:
+    print("⚠️ Warning: BOT_TOKEN is missing (Normal during Vercel Build stage)", flush=True)
+    ptb_app = None
 
 # --- HELPER FUNCTIONS ---
 def generate_code():
@@ -123,6 +127,7 @@ async def show_main_menu(bot, chat_id, is_callback=False, message_id=None):
 
 # --- ADMIN SECURED HANDLER (/a) ---
 async def verify_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if users_col is None: return
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("❌ **Access Denied!**")
         return
@@ -138,6 +143,7 @@ async def verify_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- MESSAGE HANDLER (START & GLOBAL CAPTURE) ---
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if users_col is None or files_col is None: return
     if not update.message: return
     bot = context.bot
     chat_id = update.message.chat_id
@@ -329,6 +335,7 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- CALLBACK QUERY HANDLERS ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if users_col is None: return
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
@@ -369,9 +376,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(bot, chat_id, is_callback=True, message_id=message_id)
 
 # --- HANDLERS REGISTRATION ---
-ptb_app.add_handler(CommandHandler("a", verify_user_handler))
-ptb_app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND | filters.ALL, handle_all_messages))
-ptb_app.add_handler(CallbackQueryHandler(callback_handler))
+if ptb_app:
+    ptb_app.add_handler(CommandHandler("a", verify_user_handler))
+    ptb_app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND | filters.ALL, handle_all_messages))
+    ptb_app.add_handler(CallbackQueryHandler(callback_handler))
 
 # --- FLASK WEBHOOK SYSTEM ---
 @app.route('/', methods=['GET'])
@@ -380,6 +388,9 @@ def index():
 
 @app.route('/webhook', methods=['POST'])
 def telegram_webhook():
+    if ptb_app is None:
+        return jsonify({"status": "error", "message": "Bot not initialized"}), 200
+        
     if request.method == "POST":
         try:
             update_json = request.get_json(force=True)
@@ -399,6 +410,9 @@ def telegram_webhook():
             print(f"💥 Webhook Process Error: {e}", flush=True)
             return jsonify({"status": "error"}), 200
     return "Method Not Allowed", 400
+
+# --- VERCEL FORCED GLOBAL EXPORT ---
+app = app
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=7860)
