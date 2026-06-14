@@ -26,7 +26,6 @@ db_client = AsyncIOMotorClient(DB_URI)
 db = db_client["FileStoreDB"]
 users_col = db["users"]
 files_col = db["files"]
-shorteners_col = db["shorteners"]  # New collection shorteners ke liye
 
 user_states = {} 
 BOT_USERNAME = "" 
@@ -38,7 +37,6 @@ def generate_code():
 
 async def show_main_menu(client, message, user_id, is_callback=False):
     text = "📂 **Main Menu**\n\nNiche diye gaye buttons ka use karein:"
-    # Ab 5 buttons show honge (2 lines me beautifully managed)
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Your Links", callback_data="your_links"),
          InlineKeyboardButton("⚙️ Enter Your Shortener", callback_data="enter_shortener")],
@@ -58,6 +56,7 @@ async def start_handler(client, message):
     user_id = message.from_user.id
     text_args = message.text.split()
     
+    # Deep Linking Handling
     if len(text_args) > 1:
         raw_code = text_args[1]
         code = raw_code.strip()
@@ -91,6 +90,7 @@ async def start_handler(client, message):
             await message.reply_text("✅ Sari files successfully deliver ho chuki hain!")
         return
 
+    # Normal /start
     user = await users_col.find_one({"user_id": user_id})
     if not user:
         text = "👋 Welcome! Is bot me files store karne ke liye aapko account create karna hoga."
@@ -104,11 +104,13 @@ async def start_handler(client, message):
         await show_main_menu(client, message, user_id)
 
 
+# --- SECURED ADMIN VERIFY COMMAND (/a userid) ---
 @bot.on_message(filters.command("a") & filters.private)
 async def verify_user_handler(client, message):
     sender_id = message.from_user.id
+    
     if sender_id != OWNER_ID:
-        await message.reply_text("❌ **Access Denied!** Aap admin/owner nahi hain.")
+        await message.reply_text("❌ **Access Denied!** Aap admin/owner nahi hain. Yeh command srif main owner run kar sakta hai.")
         return
         
     text_args = message.text.split()
@@ -119,7 +121,7 @@ async def verify_user_handler(client, message):
     try:
         target_id = int(text_args[1])
     except ValueError:
-        await message.reply_text("❌ Invalid User ID.")
+        await message.reply_text("❌ Invalid User ID. ID hamesha number hota hai.")
         return
         
     user = await users_col.find_one({"user_id": target_id})
@@ -140,7 +142,7 @@ async def verify_user_handler(client, message):
             text="🎉 **Aapka account admin dwara verify kar diya gaya hai!**\nAb aap files upload kar sakte hain. Main menu dekhne ke liye `/start` karein."
         )
     except Exception as e:
-        await message.reply_text(f"⚠️ User ko notify nahi kiya ja saka: {e}")
+        await message.reply_text(f"⚠️ User verified ho gaya, par use bot block karne ki wajah se message nahi jaa saka: {e}")
 
 
 # --- CALLBACK QUERY HANDLERS ---
@@ -155,7 +157,8 @@ async def callback_handler(client, callback_query):
     if data == "create_account":
         user = await users_col.find_one({"user_id": user_id})
         if not user:
-            await users_col.insert_one({"user_id": user_id, "links": [], "status": "unverified"})
+            # "shorteners" array bhi pehle se taiyar rakha hai
+            await users_col.insert_one({"user_id": user_id, "links": [], "shorteners": [], "status": "unverified"})
             await message.reply_text("🎉 Account successfully ban gaya!")
         await show_main_menu(client, message, user_id, is_callback=False)
 
@@ -174,11 +177,10 @@ async def callback_handler(client, callback_query):
         await message.edit_text(links_text, reply_markup=back_button, disable_web_page_preview=True)
 
     elif data == "enter_shortener":
-        # Naya state shortener APIs collect karne ke liye
         user_states[user_id] = {"state": "waiting_api", "apis": []}
         await message.edit_text(
-            "⚙️ **Shortener API Input Mode:**\n\nApne saare shortener ke API links ek-ek karke niche send karein.\n\n"
-            "Jab aap saare APIs bhej dein, tab kaam khatam karne ke liye `/end` command send karein.",
+            "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link (arolinks, vplink, instantshortner etc.) ek-ek karke send karein.\n\n"
+            "Jab saare API send kar dein, tab save karne ke liye `/end` command bhein.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
 
@@ -205,7 +207,6 @@ async def callback_handler(client, callback_query):
 
     elif data == "delete_account_final":
         await users_col.delete_one({"user_id": user_id})
-        await shorteners_col.delete_many({"user_id": user_id}) # User ke shorteners bhi clear ho jayenge
         if user_id in user_states: del user_states[user_id]
         await message.edit_text("🗑️ Aapka account delete ho chuka hai. Dobara judne ke liye `/start` karein.")
 
@@ -214,7 +215,7 @@ async def callback_handler(client, callback_query):
         await show_main_menu(client, message, user_id, is_callback=True)
 
 
-# --- TEXT & FILE HANDLERS / /end COMMAND HANDLER ---
+# --- TEXT & FILE HANDLERS / /end HANDLER ---
 
 @bot.on_message(filters.private & filters.command("end"))
 async def end_command_handler(client, message):
@@ -223,7 +224,7 @@ async def end_command_handler(client, message):
     user = await users_col.find_one({"user_id": user_id})
     if user and user.get("status") == "unverified":
         username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
-        log_text = f"key user ({username})\nUser id({user_id})\nNa file/api upload karan key kosis key"
+        log_text = f"key user ({username})\nUser id({user_id})\nNa file upload/api upload karan key kosis key"
         try: await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
         except Exception as e: print(f"Log Group Error: {e}")
         
@@ -232,12 +233,12 @@ async def end_command_handler(client, message):
         return
 
     if user_id not in user_states:
-        await message.reply_text("❌ Aap kisi active process (Bulk ya API mode) me nahi hain.")
+        await message.reply_text("❌ Aap kisi active mode me nahi hain (Bulk upload ya API mode open karein).")
         return
         
     state_type = user_states[user_id]["state"]
 
-    # 1. AGAR USER SHORTENER API DAAL RAHA THA
+    # 1. API LINK STORAGE FIX (Saves inside user's main document row)
     if state_type == "waiting_api":
         all_apis = user_states[user_id]["apis"]
         if not all_apis:
@@ -246,22 +247,21 @@ async def end_command_handler(client, message):
             await show_main_menu(client, message, user_id)
             return
             
-        status_msg = await message.reply_text("⏳ Saare APIs ko database me alag-alag rows me save kiya jaa raha hai...")
+        status_msg = await message.reply_text("⏳ Saare APIs ko aapke account row me store kiya jaa raha hai...")
         
-        # Ek-ek karke saare apis ko user_id ke sath new row bana kar insert karna
-        for api_url in all_apis:
-            await shorteners_col.insert_one({
-                "user_id": user_id,
-                "api_link": api_url
-            })
+        # FIX: Pushes all collected apis into the 'shorteners' array of the same user document
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$push": {"shorteners": {"$each": all_apis}}}
+        )
             
         count = len(all_apis)
         del user_states[user_id]
         await status_msg.delete()
-        await message.reply_text(f"✅ Successfully aapke saare **{count} API links** alag-alag rows me save kar diye gaye hain!")
+        await message.reply_text(f"✅ Successfully aapke saare **{count} API links** aapke database me save ho chuke hain!")
         await show_main_menu(client, message, user_id)
 
-    # 2. AGAR USER BULK FILES UPLOAD KAR RAHA THA
+    # 2. BULK FILES HANDLER
     elif state_type == "waiting_bulk":
         all_files = user_states[user_id]["bulk_files"]
         if not all_files:
@@ -297,7 +297,7 @@ async def end_command_handler(client, message):
         await show_main_menu(client, message, user_id)
 
 
-# --- GENERAL TEXT MSG HANDLER (For API input) ---
+# --- GENERAL TEXT CAPTURE HANDLER (For Shortener Links) ---
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "end", "a"]))
 async def text_handler(client, message):
     user_id = message.from_user.id
@@ -309,12 +309,10 @@ async def text_handler(client, message):
     if user_states[user_id]["state"] == "waiting_api":
         api_text = message.text.strip()
         
-        # Ek simple check ki user link hi bhej raha hai na
         if not (api_text.startswith("http://") or api_text.startswith("https://")):
-            await message.reply_text("❌ Galat format! Kripya valid shortener API URL send karein.")
+            await message.reply_text("❌ Galat format! Kripya valid full shortener API URL send karein.")
             return
             
-        # User ke state list me link add karna
         user_states[user_id]["apis"].append(api_text)
         current_count = len(user_states[user_id]["apis"])
         
@@ -334,6 +332,7 @@ async def file_receiver_handler(client, message):
         await message.reply_text("⚠️ Pehle `/start` karke account create karein.")
         return
 
+    # UNVERIFIED USERS LOCK
     if user.get("status") == "unverified":
         username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         log_text = f"key user ({username})\nUser id({user_id})\nNa file upload karan key kosis key"
