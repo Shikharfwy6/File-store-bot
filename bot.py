@@ -37,18 +37,13 @@ def generate_code():
     return "".join(secrets.choice(chars) for _ in range(12))
 
 def get_tonight_expiry():
-    """Calculates midnight (23:59:59) of current day in IST/Local"""
-    # Agar aapka server India ke timezone (IST) me nahi hai, to timedelta use karein.
-    # Yeh code server ke local time ke hisab se raat ke 11:59:59 PM ka timestamp nikalega.
     now = datetime.now()
     midnight = datetime.combine(now.date(), time(23, 59, 59))
     return midnight
 
 async def get_shortened_url(api_url, long_url):
-    """Dynamically handles general shortener API requests"""
+    """Robust handling for various shortener APIs with verification guardrail"""
     try:
-        # standard shortener formats (api?api=TOKEN&url=LINK or similar)
-        # Hum generic format follow kar rahe hain, aap apne shortener ke exact format ke hisab se modify kar sakte hain
         clean_api = api_url.strip()
         connector = "&" if "?" in clean_api else "?"
         final_api_call = f"{clean_api}{connector}url={long_url}"
@@ -56,15 +51,32 @@ async def get_shortened_url(api_url, long_url):
         async with aiohttp.ClientSession() as session:
             async with session.get(final_api_call, timeout=10) as response:
                 if response.status == 200:
-                    res_json = await response.json()
-                    if "shortenedUrl" in res_json:
-                        return res_json["shortenedUrl"]
-                    elif "shortlink" in res_json:
-                        return res_json["shortlink"]
-                    elif "link" in res_json:
-                        return res_json["link"]
-                    elif res_json.get("status") == "success":
-                        return res_json.get("shortenedUrl") or res_json.get("link")
+                    # Pure text shortener handling (Kuch APIs direct plain text short link return karti hain)
+                    try:
+                        res_json = await response.json()
+                        short_url = None
+                        
+                        # Alalag shorteners ke standard JSON formats scan karein
+                        if "shortenedUrl" in res_json:
+                            short_url = res_json["shortenedUrl"]
+                        elif "shortlink" in res_json:
+                            short_url = res_json["shortlink"]
+                        elif "link" in res_json:
+                            short_url = res_json["link"]
+                        elif "data" in res_json and isinstance(res_json["data"], dict) and "shortitem" in res_json["data"]:
+                            short_url = res_json["data"]["shortitem"]
+                        elif res_json.get("status") == "success":
+                            short_url = res_json.get("shortenedUrl") or res_json.get("link")
+                            
+                    except Exception:
+                        # Agar JSON nahi hai to text try karein
+                        res_text = await response.text()
+                        short_url = res_text.strip()
+
+                    # Validation Layer: Check karo ki return data actual URL hai ya nahi
+                    if short_url and (short_url.startswith("http://") or short_url.startswith("https://")):
+                        return short_url
+
         return long_url
     except Exception as e:
         print(f"Shortener API Error: {e}")
@@ -94,8 +106,6 @@ async def start_handler(client, message):
     # 1. Verification Handler Link (?start=verify_XXXX)
     if len(text_args) > 1 and text_args[1].startswith("verify_"):
         verify_token = text_args[1]
-        
-        # Pure Database me check karo ki ye verification token kis owner ke kis user ka hai
         owner_doc = await users_col.find_one({"Users.verify_token": verify_token})
         
         if not owner_doc:
@@ -103,8 +113,6 @@ async def start_handler(client, message):
             return
             
         expiry_time = get_tonight_expiry()
-        
-        # Owner ke user list me specific record ko update karo
         await users_col.update_one(
             {"user_id": owner_doc["user_id"], "Users.verify_token": verify_token},
             {"$set": {
@@ -112,7 +120,6 @@ async def start_handler(client, message):
                 "Users.$.expiretime": expiry_time
             }}
         )
-        
         await message.reply_text("✅ **Aap successfully verify ho chuke hain!**\nAb aap owner ke link se file access kar sakte hain. Dubara file link par click karein.")
         return
 
@@ -127,12 +134,10 @@ async def start_handler(client, message):
             
         file_owner_id = file_data.get("owner_id")
         
-        # Agar file kisi registered owner ki hai to verification logic check karein
         if file_owner_id and file_owner_id != user_id:
             owner_profile = await users_col.find_one({"user_id": file_owner_id})
             
             if owner_profile:
-                # Check user inside owner's database array
                 users_array = owner_profile.get("Users", [])
                 target_user = next((u for u in users_array if u["userid"] == user_id), None)
                 
@@ -140,19 +145,16 @@ async def start_handler(client, message):
                 is_verified = False
                 
                 if target_user:
-                    # Check if already verified and not expired
                     if target_user.get("status") == "verified":
                         exp_time = target_user.get("expiretime")
                         if exp_time and now < exp_time:
                             is_verified = True
                         else:
-                            # Auto reset to unverified if expired
                             await users_col.update_one(
                                 {"user_id": file_owner_id, "Users.userid": user_id},
                                 {"$set": {"Users.$.status": "unverified", "Users.$.verify_token": None}}
                             )
                 else:
-                    # Agar new user aya hai to default record push karo status: unverified ke sath
                     new_user_data = {
                         "userid": user_id,
                         "status": "unverified",
@@ -164,20 +166,17 @@ async def start_handler(client, message):
                         {"$push": {"Users": new_user_data}}
                     )
                 
-                # Agar user verified nahi hai to chain shortener logic trigger karein
                 if not is_verified:
                     status_msg = await message.reply_text("⏳ **Aapka verification check kiya jaa raha hai...**\nShortener link ready ho raha hai, kripya thoda intezar karein.")
                     
                     random_verify_str = f"verify_{generate_code().lower()}"
                     base_verify_url = f"https://t.me/{BOT_USERNAME}?start={random_verify_str}"
                     
-                    # Update dynamic verification token for safety match
                     await users_col.update_one(
                         {"user_id": file_owner_id, "Users.userid": user_id},
                         {"$set": {"Users.$.verify_token": random_verify_str}}
                     )
                     
-                    # Shorteners Loop Chain Logic (API 1 -> API 2 -> API 3)
                     owner_apis = owner_profile.get("shorteners", [])
                     final_short_url = base_verify_url
                     
@@ -187,6 +186,10 @@ async def start_handler(client, message):
                     
                     await status_msg.delete()
                     
+                    # Double Check: Agar abhi bhi final_short_url bypass ho kar galat string bani ho to secure crash avoid format
+                    if not (final_short_url.startswith("http://") or final_short_url.startswith("https://")):
+                        final_short_url = base_verify_url
+                        
                     verification_button = InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔐 Verify Account", url=final_short_url)]
                     ])
@@ -197,7 +200,7 @@ async def start_handler(client, message):
                     )
                     return
 
-        # Agar User verified hai ya khud Owner hai tab file deliver hogi:
+        # File Delivery Section
         file_ids = file_data["file_ids"]
         next_part_code = file_data.get("next_part", None)
         
@@ -266,7 +269,6 @@ async def callback_handler(client, callback_query):
     if data == "create_account":
         user = await users_col.find_one({"user_id": user_id})
         if not user:
-            # Users list initialized dynamically inside row structure
             await users_col.insert_one({"user_id": user_id, "links": [], "shorteners": [], "status": "unverified", "Users": []})
             await message.reply_text("🎉 Account successfully ban gaya!")
         await show_main_menu(client, message, user_id, is_callback=False)
@@ -334,7 +336,7 @@ async def end_command_handler(client, message):
         username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         log_text = f"key user ({username})\nUser id({user_id})\nNa file upload/api upload karan key kosis key"
         try: await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
-        except Exception as e: print(f"Log Group Error: {e}")
+        except Exception: pass
         
         await message.reply_text(f"❌ you need to connect admin for approval \nUsername ho {ADMIN_USERNAME}")
         if user_id in user_states: del user_states[user_id]
@@ -376,7 +378,6 @@ async def end_command_handler(client, message):
 
         for idx, chunk in enumerate(reversed(chunks)):
             code = generate_code()
-            # CRITICAL FIX: Adding owner_id mapping inside file document logic row
             doc = {"code": code, "file_ids": chunk, "owner_id": user_id}
             if previous_code:
                 doc["next_part"] = previous_code
@@ -441,9 +442,7 @@ async def file_receiver_handler(client, message):
         code = generate_code()
         share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
         
-        # CRITICAL FIX: Adding owner_id mapping here too
         await files_col.insert_one({"code": code, "file_ids": [file_id], "owner_id": user_id})
-        
         await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
         del user_states[user_id]
         await message.reply_text(f"✅ **Single File Link Ready:**\n\n🔗 {share_link}", disable_web_page_preview=True)
