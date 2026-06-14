@@ -27,7 +27,6 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "free_file_store2026_bot")
 ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
 # --- INITIALIZATION ---
-# Vercel Serverless ke liye workers loop optimization disabled rakha jata hai
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
 db_client = AsyncIOMotorClient(DB_URI)
 db = db_client["FileStoreDB"]
@@ -397,11 +396,9 @@ async def file_receiver_handler(client, message):
 def index():
     if request.method == "POST":
         try:
-            # Telegram se aane wale incoming JSON payloads ko parse karke Pyrogram engine me feed karein
             update = request.get_json()
             if update:
                 loop = asyncio.get_event_loop()
-                # Pyrogram manually update processing engine block trigger
                 telegram_update = Update.parse(bot, update)
                 loop.run_until_complete(bot.handlers_manager.check(telegram_update))
         except Exception as e:
@@ -409,8 +406,13 @@ def index():
         return "OK", 200
     return "Bot is running on Webhook mode!", 200
 
-# Vercel Serverless environment initialization context
-# Pyrogram client session instance runs on transient state inside serverless worker
+# Vercel Environment logic adjustment
 loop = asyncio.get_event_loop()
 if not bot.is_connected:
     loop.run_until_complete(bot.start())
+
+# --- CRITICAL VERCEL FIX: EXPOSE TOP-LEVEL HANDLERS ---
+# Yeh variables Vercel ko batate hain ki Flask app execution point kahan hai
+app = app
+application = app
+handler = app
