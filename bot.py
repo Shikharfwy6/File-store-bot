@@ -2,6 +2,7 @@ import os
 import secrets
 import string
 import asyncio
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -16,9 +17,12 @@ BOT_USERNAME = "free_file_store2026_bot_bot" # Bot ka username (bina @ ke)
 START_IMAGE = "https://i.postimg.cc/jdcrNdQq/images-2026-06-13T195118-621.jpg" # /start par jo image dikhani hai
 
 # Log Group, Admin aur Owner Configuration
-LOG_GROUP_ID = -1005408786306     # Aapka group ID jahan notification jayega
+LOG_GROUP_ID = -5408786306     # Aapka group ID jahan notification jayega
 ADMIN_USERNAME = "@Cources99"  # Contact username unverified users ke liye
-OWNER_ID = 7559016251         # CRITICAL: Srif yeh ID hi users ko verify kar sakti hai
+OWNER_ID = 7559016251         # Srif yeh ID hi users ko verify kar sakti hai
+
+# Arolinks API Key
+AROLINKS_API_KEY = "f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
 # --- INITIALIZATION ---
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -30,10 +34,28 @@ files_col = db["files"]
 user_states = {} 
 BOT_USERNAME = "" 
 
-# --- HELPER FUNCTION (Safe Alphanumeric Code) ---
+# --- HELPER FUNCTIONS ---
 def generate_code():
     chars = string.ascii_letters + string.digits
     return "".join(secrets.choice(chars) for _ in range(12))
+
+async def get_short_link(long_url):
+    """Arolinks API se URL short karne ka function"""
+    api_url = f"https://arolinks.com/api?api={AROLINKS_API_KEY}&url={long_url}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=10) as response:
+                if response.status == 200:
+                    res_json = await response.json()
+                    if res_json.get("status") == "success" and res_json.get("shortenedUrl"):
+                        return res_json.get("shortenedUrl")
+                    elif res_json.get("shortedUrl"): # Kuch APIs me format alag hota hai
+                        return res_json.get("shortedUrl")
+    except Exception as e:
+        print(f"Error shortening link via Arolinks: {e}")
+    
+    # Backup: Agar API fail ho jaye toh original link return karega
+    return long_url
 
 async def show_main_menu(client, message, user_id, is_callback=False):
     text = "📂 **Main Menu**\n\nNiche diye gaye buttons ka use karein:"
@@ -83,7 +105,9 @@ async def start_handler(client, message):
                 
         if next_part_code:
             next_link = f"https://t.me/{BOT_USERNAME}?start={next_part_code}"
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton("⏩ Get Next Part Files", url=next_link)]])
+            # Next part button ko bhi short karna hai
+            short_next_link = await get_short_link(next_link)
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("⏩ Get Next Part Files", url=short_next_link)]])
             await message.reply_text("✨ Is part ki 50 files complete ho gayi hain. Agla part lene ke liye niche click karein 👇", reply_markup=markup)
         else:
             await message.reply_text("✅ Sari files successfully deliver ho chuki hain!")
@@ -108,7 +132,6 @@ async def start_handler(client, message):
 async def verify_user_handler(client, message):
     sender_id = message.from_user.id
     
-    # CRITICAL SECURITY CHECK: Srif aapki ID (7559016251) check hogi
     if sender_id != OWNER_ID:
         await message.reply_text("❌ **Access Denied!** Aap admin/owner nahi hain. Yeh command srif main owner run kar sakta hai.")
         return
@@ -124,7 +147,6 @@ async def verify_user_handler(client, message):
         await message.reply_text("❌ Invalid User ID. ID hamesha number hota hai.")
         return
         
-    # Check if user exists in DB
     user = await users_col.find_one({"user_id": target_id})
     if not user:
         await message.reply_text("❌ Yeh user database me nahi mila.")
@@ -134,11 +156,9 @@ async def verify_user_handler(client, message):
         await message.reply_text("⚠️ Yeh user pehle se hi verified hai.")
         return
         
-    # Database me status 'verified' set karna
     await users_col.update_one({"user_id": target_id}, {"$set": {"status": "verified"}})
     await message.reply_text(f"✅ User `{target_id}` ko successfully verify kar diya gaya hai!")
     
-    # User ko private me chat par message notify karna
     try:
         await client.send_message(
             chat_id=target_id,
@@ -160,7 +180,6 @@ async def callback_handler(client, callback_query):
     if data == "create_account":
         user = await users_col.find_one({"user_id": user_id})
         if not user:
-            # Status default 'unverified' set hoga
             await users_col.insert_one({"user_id": user_id, "links": [], "status": "unverified"})
             await message.reply_text("🎉 Account successfully ban gaya!")
         await show_main_menu(client, message, user_id, is_callback=False)
@@ -236,7 +255,7 @@ async def bulk_end_handler(client, message):
         await message.reply_text("⚠️ Aapne koi file upload nahi ki.")
         return
         
-    status_msg = await message.reply_text("⏳ Processing aur split links generate kiye jaa rhe hain...")
+    status_msg = await message.reply_text("⏳ Processing aur split links short kiye jaa rhe hain...")
     
     chunks = [all_files[i:i + 50] for i in range(0, len(all_files), 50)]
     previous_code = None
@@ -254,12 +273,16 @@ async def bulk_end_handler(client, message):
         if idx == len(chunks) - 1:
             first_share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
 
-    await users_col.update_one({"user_id": user_id}, {"$push": {"links": first_share_link}})
+    # Link Shortening integration
+    short_link = await get_short_link(first_share_link)
+
+    # Shorten link ko hi database me user history me daal rhe hain
+    await users_col.update_one({"user_id": user_id}, {"$push": {"links": short_link}})
     del user_states[user_id]
     
     await status_msg.delete()
     await message.reply_text(
-        f"✅ **Bulk Link Generated!**\n\n🔗 **Main Link:** {first_share_link}",
+        f"✅ **Bulk Link Generated!**\n\n🔗 **Short Link:** {short_link}",
         disable_web_page_preview=True
     )
     await show_main_menu(client, message, user_id)
@@ -273,10 +296,8 @@ async def file_receiver_handler(client, message):
         await message.reply_text("⚠️ Pehle `/start` karke account create karein.")
         return
 
-    # UNVERIFIED USERS LOCK
     if user.get("status") == "unverified":
         username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
-        
         log_text = f"key user ({username})\nUser id({user_id})\nNa file upload karan key kosis key"
         try:
             await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
@@ -303,10 +324,14 @@ async def file_receiver_handler(client, message):
     if state_data["state"] == "waiting_single":
         code = generate_code()
         share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
+        
+        # Link Shortening integration
+        short_link = await get_short_link(share_link)
+        
         await files_col.insert_one({"code": code, "file_ids": [file_id]})
-        await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
+        await users_col.update_one({"user_id": user_id}, {"$push": {"links": short_link}})
         del user_states[user_id]
-        await message.reply_text(f"✅ **Single File Link Ready:**\n\n🔗 {share_link}", disable_web_page_preview=True)
+        await message.reply_text(f"✅ **Single File Link Ready:**\n\n🔗 {short_link}", disable_web_page_preview=True)
         await show_main_menu(client, message, user_id)
 
     elif state_data["state"] == "waiting_bulk":
@@ -332,3 +357,4 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+            
