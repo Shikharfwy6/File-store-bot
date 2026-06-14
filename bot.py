@@ -42,40 +42,50 @@ def get_tonight_expiry():
     return midnight
 
 async def get_shortened_url(api_url, long_url):
-    """Robust handling for various shortener APIs with verification guardrail"""
+    """Fully Dynamic Shortener Handler for AroLinks, VPLinks, InstantShortener etc."""
     try:
         clean_api = api_url.strip()
-        connector = "&" if "?" in clean_api else "?"
-        final_api_call = f"{clean_api}{connector}url={long_url}"
         
+        # Format standard check: Kuch owners direct full API query string de dete hain
+        # Agar link me pehle se '?api=' ya '&url=' nahi hai to hum use standard append karenge
+        if "url=" not in clean_api:
+            connector = "&" if "?" in clean_api else "?"
+            final_api_call = f"{clean_api}{connector}url={long_url}"
+        else:
+            # Agar owner ne query di hui hai to default string replace ya append setup
+            final_api_call = f"{clean_api}{long_url}" if clean_api.endswith("=") else f"{clean_api}&url={long_url}"
+            
         async with aiohttp.ClientSession() as session:
-            async with session.get(final_api_call, timeout=10) as response:
+            async with session.get(final_api_call, timeout=15) as response:
                 if response.status == 200:
-                    # Pure text shortener handling (Kuch APIs direct plain text short link return karti hain)
                     try:
+                        # 1. Try JSON Parsing
                         res_json = await response.json()
                         short_url = None
                         
-                        # Alalag shorteners ke standard JSON formats scan karein
+                        # Har tarah ke shorteners ke alag-alag JSON response keys ka system
                         if "shortenedUrl" in res_json:
                             short_url = res_json["shortenedUrl"]
                         elif "shortlink" in res_json:
                             short_url = res_json["shortlink"]
                         elif "link" in res_json:
                             short_url = res_json["link"]
-                        elif "data" in res_json and isinstance(res_json["data"], dict) and "shortitem" in res_json["data"]:
-                            short_url = res_json["data"]["shortitem"]
+                        elif "url" in res_json:
+                            short_url = res_json["url"]
+                        elif "data" in res_json and isinstance(res_json["data"], dict):
+                            short_url = res_json["data"].get("shortitem") or res_json["data"].get("shortenedUrl") or res_json["data"].get("shortlink")
                         elif res_json.get("status") == "success":
-                            short_url = res_json.get("shortenedUrl") or res_json.get("link")
+                            short_url = res_json.get("shortenedUrl") or res_json.get("link") or res_json.get("url")
+                            
+                        if short_url and (short_url.startswith("http://") or short_url.startswith("https://")):
+                            return short_url
                             
                     except Exception:
-                        # Agar JSON nahi hai to text try karein
+                        # 2. Try Plain Text Parsing (Kuch shorteners JSON nahi, direct url response dete hain)
                         res_text = await response.text()
-                        short_url = res_text.strip()
-
-                    # Validation Layer: Check karo ki return data actual URL hai ya nahi
-                    if short_url and (short_url.startswith("http://") or short_url.startswith("https://")):
-                        return short_url
+                        res_text = res_text.strip()
+                        if res_text.startswith("http://") or res_text.startswith("https://"):
+                            return res_text
 
         return long_url
     except Exception as e:
@@ -181,12 +191,12 @@ async def start_handler(client, message):
                     final_short_url = base_verify_url
                     
                     if owner_apis:
+                        # Chain Loop Execute
                         for api in owner_apis:
                             final_short_url = await get_shortened_url(api, final_short_url)
                     
                     await status_msg.delete()
                     
-                    # Double Check: Agar abhi bhi final_short_url bypass ho kar galat string bani ho to secure crash avoid format
                     if not (final_short_url.startswith("http://") or final_short_url.startswith("https://")):
                         final_short_url = base_verify_url
                         
@@ -291,6 +301,7 @@ async def callback_handler(client, callback_query):
         user_states[user_id] = {"state": "waiting_api", "apis": []}
         await message.edit_text(
             "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link ek-ek karke send karein.\n\n"
+            "Format Example:\n`https://arolinks.com/api?api=YOUR_TOKEN_HERE`\n\n"
             "Jab saare API send kar dein, tab save karne ke liye `/end` command bhein.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
