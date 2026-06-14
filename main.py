@@ -1,3 +1,4 @@
+
 import os
 import secrets
 import string
@@ -10,7 +11,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import FastAPI, Request, Response
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Environment Variables recommended) ---
 API_ID = int(os.environ.get("API_ID", 1234567))          
 API_HASH = os.environ.get("API_HASH", "your_asli_api_hash") 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_asli_bot_token") 
@@ -25,7 +26,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", 7559016251))
 ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
 # --- INITIALIZATION ---
-# Vercel par in_memory=True rakhna zaroori hai taaki session file write na kare disk par
+# Vercel par in_memory=True compulsory hai taaki disk par `.session` file na bane
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 db_client = AsyncIOMotorClient(DB_URI)
 db = db_client["FileStoreDB"]
@@ -33,9 +34,12 @@ users_col = db["users"]
 files_col = db["files"]
 
 user_states = {} 
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "") # Vercel environment me set karein ya dynamically fetch hoga
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "") 
 
+# --- FASTAPI APP DECLARATION (TOP-LEVEL) ---
+# Vercel isi 'app' object ko dhoondta hai. Iska naam mat badalna.
 app = FastAPI()
+handler = app  
 
 # --- HELPER FUNCTIONS ---
 def generate_code():
@@ -57,7 +61,8 @@ async def get_shortened_url(api_url, long_url):
         final_api_call = f"{clean_api}{connector}url={long_url}"
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(final_api_call, timeout=15) as response:
+            # Timeout ko 7 seconds kiya taaki Vercel serverless request timeout na ho
+            async with session.get(final_api_call, timeout=7) as response:
                 if response.status == 200:
                     try:
                         res_json = await response.json()
@@ -362,7 +367,6 @@ async def file_receiver_handler(client, message):
 
 @app.on_event("startup")
 async def startup():
-    # Vercel lifecycle me bot start hoga jab function trigger hoga
     if not bot.is_connected:
         await bot.start()
 
@@ -377,13 +381,9 @@ async def root():
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    """Is route par Telegram ka har update receive hoga"""
     try:
         json_data = await request.json()
-        # Raw json ko Pyrogram object me parse karke feed karna
         update = Update.稼(json_data, bot) if hasattr(Update, '稼') else json_data
-        
-        # Pyrogram update parser logic
         await bot.parse_update(update)
     except Exception as e:
         print(f"Webhook update error: {e}")
