@@ -2,6 +2,7 @@ import os
 import secrets
 import string
 import asyncio
+import re
 from datetime import datetime, timedelta, time
 import aiohttp
 from pyrogram import Client, filters
@@ -42,28 +43,28 @@ def get_tonight_expiry():
     return midnight
 
 async def get_shortened_url(api_url, long_url):
-    """Fully Dynamic Shortener Handler for AroLinks, VPLinks, InstantShortener etc."""
+    """Cleans up template parameters like &url=... &alias=... and requests short link"""
     try:
         clean_api = api_url.strip()
         
-        # Format standard check: Kuch owners direct full API query string de dete hain
-        # Agar link me pehle se '?api=' ya '&url=' nahi hai to hum use standard append karenge
-        if "url=" not in clean_api:
-            connector = "&" if "?" in clean_api else "?"
-            final_api_call = f"{clean_api}{connector}url={long_url}"
-        else:
-            # Agar owner ne query di hui hai to default string replace ya append setup
-            final_api_call = f"{clean_api}{long_url}" if clean_api.endswith("=") else f"{clean_api}&url={long_url}"
-            
+        # FIX LOGIC: Agar owner ne pura link dummy parameter ke sath dala hai, to use clean karo
+        # Yeh split karega '&url=' ya '?url=' se aur sirf main API endpoint bachaega
+        clean_api = re.split(r'[&?]url=', clean_api, flags=re.IGNORECASE)[0]
+        # Same alias ke liye bhi clear filter lagayenge
+        clean_api = re.split(r'[&?]alias=', clean_api, flags=re.IGNORECASE)[0]
+        
+        # Ab fresh query parameter build karein
+        connector = "&" if "?" in clean_api else "?"
+        final_api_call = f"{clean_api}{connector}url={long_url}"
+        
         async with aiohttp.ClientSession() as session:
             async with session.get(final_api_call, timeout=15) as response:
                 if response.status == 200:
                     try:
-                        # 1. Try JSON Parsing
                         res_json = await response.json()
                         short_url = None
                         
-                        # Har tarah ke shorteners ke alag-alag JSON response keys ka system
+                        # Multi-Shortener format verification keys
                         if "shortenedUrl" in res_json:
                             short_url = res_json["shortenedUrl"]
                         elif "shortlink" in res_json:
@@ -81,7 +82,7 @@ async def get_shortened_url(api_url, long_url):
                             return short_url
                             
                     except Exception:
-                        # 2. Try Plain Text Parsing (Kuch shorteners JSON nahi, direct url response dete hain)
+                        # Plain text parser engine fallback
                         res_text = await response.text()
                         res_text = res_text.strip()
                         if res_text.startswith("http://") or res_text.startswith("https://"):
@@ -191,7 +192,6 @@ async def start_handler(client, message):
                     final_short_url = base_verify_url
                     
                     if owner_apis:
-                        # Chain Loop Execute
                         for api in owner_apis:
                             final_short_url = await get_shortened_url(api, final_short_url)
                     
@@ -300,8 +300,7 @@ async def callback_handler(client, callback_query):
     elif data == "enter_shortener":
         user_states[user_id] = {"state": "waiting_api", "apis": []}
         await message.edit_text(
-            "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link ek-ek karke send karein.\n\n"
-            "Format Example:\n`https://arolinks.com/api?api=YOUR_TOKEN_HERE`\n\n"
+            "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link ek-ek karke send karein.\n\nAap direct website documentation se copy karke bhi bhej sakte hain (Jaise `&url=yourdestinationlink.com` ke sath).\n\n"
             "Jab saare API send kar dein, tab save karne ke liye `/end` command bhein.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
         )
