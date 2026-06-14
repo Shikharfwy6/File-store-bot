@@ -27,7 +27,6 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "free_file_store2026_bot")
 ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
 # --- INITIALIZATION ---
-# Vercel Serverless optimization: Client ko explicitly instantiate karein bina automatically start kiye
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
 db_client = AsyncIOMotorClient(DB_URI)
 db = db_client["FileStoreDB"]
@@ -37,6 +36,7 @@ files_col = db["files"]
 user_states = {} 
 
 # --- FLASK APP FOR VERCEL ---
+# Vercel strict matching ke liye is instance ka top-level par hona lazmi hai
 app = Flask(__name__)
 
 # --- HELPER FUNCTIONS ---
@@ -392,6 +392,7 @@ async def file_receiver_handler(client, message):
         state_data["bulk_files"].append(file_id)
         await message.reply_text(f"📥 Received ({len(state_data['bulk_files'])}).")
 
+
 # --- WEBHOOK ENDPOINTS FOR VERCEL ---
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -400,7 +401,7 @@ def index():
             update = request.get_json()
             if update:
                 loop = asyncio.get_event_loop()
-                # Serverless execution optimize sync trigger
+                # Pyrogram client ko sirf request aane par lazmi initialization context dein
                 if not bot.is_connected:
                     loop.run_until_complete(bot.start())
                 telegram_update = Update.parse(bot, update)
@@ -410,6 +411,7 @@ def index():
         return "OK", 200
     return "Bot is running on Webhook mode!", 200
 
-# Vercel requirements compatibility handler configuration
+# Global block execution completely turned off for Vercel compilation stability.
+# Strict mapping rules applied for direct "app" instance exposure.
 handler = app
 application = app
