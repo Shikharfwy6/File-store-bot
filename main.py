@@ -5,36 +5,39 @@ import asyncio
 import re
 from datetime import datetime, timedelta, time
 import aiohttp
+from flask import Flask, request, jsonify
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # --- CONFIGURATION ---
-API_ID = 33038589          # Apna API ID dalein
-API_HASH = "3a0926df33e0ada07f5f9ccb6ce8c1a3" # Apna API Hash dalein
-BOT_TOKEN = "8819160503:AAGQ8f23z3EuXyDPRRJ8vohw1fW1WtQNXQc" # Apna Bot Token dalein
-DB_URI = "mongodb+srv://Shikhar:Shikharclasstw@telegram.pnl5wrr.mongodb.net/?appName=Telegram"  # Apna MongoDB URI dalein
-CHANNEL_ID = -1003700429012   # Apna DB/Log Channel ID dalein
-BOT_USERNAME = "free_file_store2026_bot_bot" # Bot ka username (bina @ ke)
-START_IMAGE = "https://i.postimg.cc/jdcrNdQq/images-2026-06-13T195118-621.jpg" # /start par jo image dikhani hai
+API_ID = int(os.environ.get("API_ID", 1234567))          
+API_HASH = os.environ.get("API_HASH", "your_asli_api_hash") 
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_asli_bot_token") 
+DB_URI = os.environ.get("DB_URI", "mongodb+srv://...")  
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", -100xxxxxxxxx))   
+START_IMAGE = os.environ.get("START_IMAGE", "https://graph.org/file/abc.jpg") 
 
-LOG_GROUP_ID = -5408786306     
-ADMIN_USERNAME = "@Cources99"  
-OWNER_ID = 7559016251         
+LOG_GROUP_ID = int(os.environ.get("LOG_GROUP_ID", -5408786306))     
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@Cources99")  
+OWNER_ID = int(os.environ.get("OWNER_ID", 7559016251))         
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "free_file_store2026_bot")
 
 # --- ADMIN EARNING API CONFIGURATION ---
-# Yeh aapki personal API hai jisse aapko earning hogi
 ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
 
 # --- INITIALIZATION ---
-bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Vercel Serverless ke liye workers loop optimization disabled rakha jata hai
+bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4)
 db_client = AsyncIOMotorClient(DB_URI)
 db = db_client["FileStoreDB"]
 users_col = db["users"]
 files_col = db["files"]
 
 user_states = {} 
-BOT_USERNAME = "" 
+
+# --- FLASK APP FOR VERCEL ---
+app = Flask(__name__)
 
 # --- HELPER FUNCTIONS ---
 def generate_code():
@@ -47,11 +50,8 @@ def get_tonight_expiry():
     return midnight
 
 async def get_shortened_url(api_url, long_url):
-    """Cleans up template parameters like &url=... &alias=... and requests short link"""
     try:
         clean_api = api_url.strip()
-        
-        # Cleaning logic for pre-formatted URLs
         clean_api = re.split(r'[&?]url=', clean_api, flags=re.IGNORECASE)[0]
         clean_api = re.split(r'[&?]alias=', clean_api, flags=re.IGNORECASE)[0]
         
@@ -59,7 +59,7 @@ async def get_shortened_url(api_url, long_url):
         final_api_call = f"{clean_api}{connector}url={long_url}"
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(final_api_call, timeout=15) as response:
+            async with session.get(final_api_call, timeout=10) as response:
                 if response.status == 200:
                     try:
                         res_json = await response.json()
@@ -86,7 +86,6 @@ async def get_shortened_url(api_url, long_url):
                         res_text = res_text.strip()
                         if res_text.startswith("http://") or res_text.startswith("https://"):
                             return res_text
-
         return long_url
     except Exception as e:
         print(f"Shortener API Error: {e}")
@@ -113,7 +112,6 @@ async def start_handler(client, message):
     user_id = message.from_user.id
     text_args = message.text.split()
     
-    # 1. Verification Handler Link (?start=verify_XXXX)
     if len(text_args) > 1 and text_args[1].startswith("verify_"):
         verify_token = text_args[1]
         owner_doc = await users_col.find_one({"Users.verify_token": verify_token})
@@ -133,10 +131,8 @@ async def start_handler(client, message):
         await message.reply_text("✅ **Aap successfully verify ho chuke hain!**\nAb aap owner ke link se file access kar sakte hain. Dubara file link par click karein.")
         return
 
-    # 2. File / Deep Linking Link Handling
     if len(text_args) > 1:
         code = text_args[1].strip()
-        
         file_data = await files_col.find_one({"code": code})
         if not file_data:
             await message.reply_text("❌ Link invalid hai ya file delete ho chuki hai.")
@@ -190,12 +186,10 @@ async def start_handler(client, message):
                     owner_apis = owner_profile.get("shorteners", [])
                     final_short_url = base_verify_url
                     
-                    # A. Pehle Owner ke saare shorteners loop me run honge
                     if owner_apis:
                         for api in owner_apis:
                             final_short_url = await get_shortened_url(api, final_short_url)
                     
-                    # B. CRITICAL MONETIZATION FIX: Owner ke baad aapka final shortener lagega
                     if ADMIN_EARNING_API:
                         final_short_url = await get_shortened_url(ADMIN_EARNING_API, final_short_url)
                     
@@ -214,7 +208,6 @@ async def start_handler(client, message):
                     )
                     return
 
-        # File Delivery Section
         file_ids = file_data["file_ids"]
         next_part_code = file_data.get("next_part", None)
         
@@ -223,7 +216,7 @@ async def start_handler(client, message):
         for f_id in file_ids:
             try:
                 await client.copy_message(chat_id=user_id, from_chat_id=CHANNEL_ID, message_id=int(f_id))
-                await asyncio.sleep(0.6)
+                await asyncio.sleep(0.4)
             except Exception as e:
                 print(f"Error forwarding file: {e}")
                 
@@ -235,7 +228,6 @@ async def start_handler(client, message):
             await message.reply_text("✅ Sari files successfully deliver ho chuki hain!")
         return
 
-    # Normal /start
     user = await users_col.find_one({"user_id": user_id})
     if not user:
         text = "👋 Welcome! Is bot me files store karne ke liye aapko account create karna hoga."
@@ -249,30 +241,18 @@ async def start_handler(client, message):
         await show_main_menu(client, message, user_id)
 
 
-# --- SECURED ADMIN VERIFY COMMAND (/a userid) ---
 @bot.on_message(filters.command("a") & filters.private)
 async def verify_user_handler(client, message):
     sender_id = message.from_user.id
-    if sender_id != OWNER_ID:
-        await message.reply_text("❌ **Access Denied!**")
-        return
-        
+    if sender_id != OWNER_ID: return
     text_args = message.text.split()
-    if len(text_args) < 2:
-        await message.reply_text("❌ Sahi format use karein: `/a target_user_id`")
-        return
-        
+    if len(text_args) < 2: return
     try: target_id = int(text_args[1])
     except ValueError: return
-        
-    user = await users_col.find_one({"user_id": target_id})
-    if not user: return
-        
     await users_col.update_one({"user_id": target_id}, {"$set": {"status": "verified"}})
-    await message.reply_text(f"✅ User `{target_id}` ko admin status verified kar diya gaya hai!")
+    await message.reply_text(f"✅ User `{target_id}` verified!")
 
 
-# --- CALLBACK QUERY HANDLERS ---
 @bot.on_callback_query()
 async def callback_handler(client, callback_query):
     user_id = callback_query.from_user.id
@@ -293,54 +273,37 @@ async def callback_handler(client, callback_query):
             back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]])
             await message.edit_text("⚠️ Aapne abhi tak koi link nahi banaya.", reply_markup=back_button)
             return
-        
         links_text = "🔗 **Aapke Saved Links:**\n\n"
-        for idx, link in enumerate(user["links"], 1):
-            links_text += f"{idx}. {link}\n"
-        
+        for idx, link in enumerate(user["links"], 1): links_text += f"{idx}. {link}\n"
         back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]])
         await message.edit_text(links_text, reply_markup=back_button, disable_web_page_preview=True)
 
     elif data == "enter_shortener":
         user_states[user_id] = {"state": "waiting_api", "apis": []}
-        await message.edit_text(
-            "⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link ek-ek karke send karein.\n\nAap direct website documentation se copy karke bhi bhej sakte hain (Jaise `&url=yourdestinationlink.com` ke sath).\n\n"
-            "Jab saare API send kar dein, tab save karne ke liye `/end` command bhein.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
-        )
+        await message.edit_text("⚙️ **Shortener API Input Mode:**\n\nApne shorteners ke API link ek-ek karke send karein.\n\nJab saare API send kar dein, tab save karne ke liye `/end` command bhein.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]]))
 
     elif data == "upload_single":
         user_states[user_id] = {"state": "waiting_single"}
-        await message.edit_text(
-            "📥 **Single File Mode:**\nAb koi bhi file forward/upload karein. Link turant ban jayega.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
-        )
+        await message.edit_text("📥 **Single File Mode:**\nAb koi bhi file forward/upload karein.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]]))
 
     elif data == "upload_bulk":
         user_states[user_id] = {"state": "waiting_bulk", "bulk_files": []}
-        await message.edit_text(
-            "📦 **Bulk File Mode:**\nSari files ek-ek karke bhejein. Jab sab upload ho jayein, tab `/end` command bhejein.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]])
-        )
+        await message.edit_text("📦 **Bulk File Mode:**\nSari files ek-ek karke bhejein. Jab sab upload ho jayein, tab `/end` command bhejein.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="back_to_menu")]]))
 
     elif data == "delete_confirm":
-        buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Haan, Delete Karo", callback_data="delete_account_final")],
-            [InlineKeyboardButton("❌ Nahi, Cancel", callback_data="back_to_menu")]
-        ])
+        buttons = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Haan, Delete Karo", callback_data="delete_account_final")], [InlineKeyboardButton("❌ Nahi, Cancel", callback_data="back_to_menu")]])
         await message.edit_text("⚠️ **Kya aap sach me apna account aur data delete karna chahte hain?**", reply_markup=buttons)
 
     elif data == "delete_account_final":
         await users_col.delete_one({"user_id": user_id})
         if user_id in user_states: del user_states[user_id]
-        await message.edit_text("🗑️ Aapka account delete ho chuka hai. Dobara judne ke liye `/start` karein.")
+        await message.edit_text("🗑️ Aapka account delete ho chuka hai.")
 
     elif data == "back_to_menu":
         if user_id in user_states: del user_states[user_id]
         await show_main_menu(client, message, user_id, is_callback=True)
 
 
-# --- TEXT & FILE HANDLERS / /end HANDLER ---
 @bot.on_message(filters.private & filters.command("end"))
 async def end_command_handler(client, message):
     user_id = message.from_user.id
@@ -351,41 +314,28 @@ async def end_command_handler(client, message):
         log_text = f"key user ({username})\nUser id({user_id})\nNa file upload/api upload karan key kosis key"
         try: await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
         except Exception: pass
-        
         await message.reply_text(f"❌ you need to connect admin for approval \nUsername ho {ADMIN_USERNAME}")
         if user_id in user_states: del user_states[user_id]
         return
 
-    if user_id not in user_states:
-        await message.reply_text("❌ Aap kisi active mode me nahi hain.")
-        return
-        
+    if user_id not in user_states: return
     state_type = user_states[user_id]["state"]
 
     if state_type == "waiting_api":
         all_apis = user_states[user_id]["apis"]
         if not all_apis:
-            await message.reply_text("⚠️ Aapne koi bhi API link send nahi kiya.")
             del user_states[user_id]
             await show_main_menu(client, message, user_id)
             return
-            
-        status_msg = await message.reply_text("⏳ Saare APIs ko save kiya jaa raha hai...")
         await users_col.update_one({"user_id": user_id}, {"$set": {"shorteners": all_apis}})
-            
-        count = len(all_apis)
         del user_states[user_id]
-        await status_msg.delete()
-        await message.reply_text(f"✅ Successfully aapke saare **{count} API links** save ho chuke hain!")
+        await message.reply_text(f"✅ Saare API save ho chuke hain!")
         await show_main_menu(client, message, user_id)
 
     elif state_type == "waiting_bulk":
         all_files = user_states[user_id]["bulk_files"]
-        if not all_files:
-            await message.reply_text("⚠️ Aapne koi file upload nahi ki.")
-            return
-            
-        status_msg = await message.reply_text("⏳ Processing aur split links generate kiye jaa rhe hain...")
+        if not all_files: return
+        status_msg = await message.reply_text("⏳ Processing split links...")
         chunks = [all_files[i:i + 50] for i in range(0, len(all_files), 50)]
         previous_code = None
         first_share_link = ""
@@ -393,94 +343,74 @@ async def end_command_handler(client, message):
         for idx, chunk in enumerate(reversed(chunks)):
             code = generate_code()
             doc = {"code": code, "file_ids": chunk, "owner_id": user_id}
-            if previous_code:
-                doc["next_part"] = previous_code
-            
+            if previous_code: doc["next_part"] = previous_code
             await files_col.insert_one(doc)
             previous_code = code
-            
-            if idx == len(chunks) - 1:
-                first_share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
+            if idx == len(chunks) - 1: first_share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
 
         await users_col.update_one({"user_id": user_id}, {"$push": {"links": first_share_link}})
         del user_states[user_id]
-        
         await status_msg.delete()
-        await message.reply_text(f"✅ **Bulk Link Generated!**\n\n🔗 **Main Link:** {first_share_link}", disable_web_page_preview=True)
+        await message.reply_text(f"✅ **Bulk Link Ready:** {first_share_link}", disable_web_page_preview=True)
         await show_main_menu(client, message, user_id)
 
 
-# --- GENERAL TEXT CAPTURE HANDLER ---
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "end", "a"]))
 async def text_handler(client, message):
     user_id = message.from_user.id
     if user_id not in user_states: return
-        
     if user_states[user_id]["state"] == "waiting_api":
         api_text = message.text.strip()
-        if not (api_text.startswith("http://") or api_text.startswith("https://")):
-            await message.reply_text("❌ Galat format!")
-            return
-            
+        if not (api_text.startswith("http://") or api_text.startswith("https://")): return
         user_states[user_id]["apis"].append(api_text)
-        current_count = len(user_states[user_id]["apis"])
-        await message.reply_text(f"📥 **API Link Received ({current_count})!**\nAgla link bhejein ya `/end` karein.")
+        await message.reply_text(f"📥 API Received ({len(user_states[user_id]['apis'])}). Send next or `/end`.")
 
 
-# --- FILE RECEIVER HANDLER ---
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo | filters.animation))
 async def file_receiver_handler(client, message):
     user_id = message.from_user.id
     user = await users_col.find_one({"user_id": user_id})
-    if not user: return
-
-    if user.get("status") == "unverified":
-        username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
-        log_text = f"key user ({username})\nUser id({user_id})\nNa file upload karan key kosis key"
-        try: await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
-        except Exception: pass
-        await message.reply_text(f"❌ you need to connect admin for approval \nUsername ho {ADMIN_USERNAME}")
-        return
-
+    if not user or user.get("status") == "unverified": return
     if user_id not in user_states: return
     state_data = user_states[user_id]
         
     try:
         forwarded = await message.forward(CHANNEL_ID)
         file_id = forwarded.id
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {e}")
-        return
+    except Exception: return
 
     if state_data["state"] == "waiting_single":
         code = generate_code()
         share_link = f"https://t.me/{BOT_USERNAME}?start={code}"
-        
         await files_col.insert_one({"code": code, "file_ids": [file_id], "owner_id": user_id})
         await users_col.update_one({"user_id": user_id}, {"$push": {"links": share_link}})
         del user_states[user_id]
-        await message.reply_text(f"✅ **Single File Link Ready:**\n\n🔗 {share_link}", disable_web_page_preview=True)
+        await message.reply_text(f"✅ **Link Ready:** {share_link}", disable_web_page_preview=True)
         await show_main_menu(client, message, user_id)
 
     elif state_data["state"] == "waiting_bulk":
         state_data["bulk_files"].append(file_id)
-        current_count = len(state_data["bulk_files"])
-        if current_count % 50 == 0:
-            await message.reply_text(f"📥 **{current_count} Files Receive!**\nKhatam karne ke liye `/end` dabayein.")
-        else:
-            await message.reply_text(f"📥 File received ({current_count}).")
+        await message.reply_text(f"📥 Received ({len(state_data['bulk_files'])}).")
 
+# --- WEBHOOK ENDPOINTS FOR VERCEL ---
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+        try:
+            # Telegram se aane wale incoming JSON payloads ko parse karke Pyrogram engine me feed karein
+            update = request.get_json()
+            if update:
+                loop = asyncio.get_event_loop()
+                # Pyrogram manually update processing engine block trigger
+                telegram_update = Update.parse(bot, update)
+                loop.run_until_complete(bot.handlers_manager.check(telegram_update))
+        except Exception as e:
+            print(f"Webhook update routing error: {e}")
+        return "OK", 200
+    return "Bot is running on Webhook mode!", 200
 
-# --- MAIN ENGINE ---
-async def main():
-    global BOT_USERNAME
-    print("Bot starting...")
-    await bot.start()
-    bot_info = await bot.get_me()
-    BOT_USERNAME = bot_info.username
-    print(f"✨ Bot is live on @{BOT_USERNAME}!")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+# Vercel Serverless environment initialization context
+# Pyrogram client session instance runs on transient state inside serverless worker
+loop = asyncio.get_event_loop()
+if not bot.is_connected:
+    loop.run_until_complete(bot.start())
