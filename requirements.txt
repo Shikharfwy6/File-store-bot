@@ -1,7 +1,7 @@
-pyrogram
-tgcrypto
+python-telegram-bot
 motor
+pymongo
 dnspython
-fastapi
-uvicorn
+flask
 aiohttp
+requests
