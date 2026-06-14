@@ -14,6 +14,12 @@ DB_URI = "mongodb+srv://Shikhar:Shikharclasstw@telegram.pnl5wrr.mongodb.net/?app
 CHANNEL_ID = -1003700429012   # Apna DB/Log Channel ID dalein
 BOT_USERNAME = "free_file_store2026_bot_bot" # Bot ka username (bina @ ke)
 START_IMAGE = "https://i.postimg.cc/jdcrNdQq/images-2026-06-13T195118-621.jpg" # /start par jo image dikhani hai
+
+# Log Group, Admin aur Owner Configuration
+LOG_GROUP_ID = -5408786306     # Aapka group ID jahan notification jayega
+ADMIN_USERNAME = "@Cources99"  # Contact username unverified users ke liye
+OWNER_ID = 7559016251         # CRITICAL: Srif yeh ID hi users ko verify kar sakti hai
+
 # --- INITIALIZATION ---
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 db_client = AsyncIOMotorClient(DB_URI)
@@ -24,9 +30,8 @@ files_col = db["files"]
 user_states = {} 
 BOT_USERNAME = "" 
 
-# --- FIXED HELPER FUNCTION (No Underscores, Safe Alphanumeric) ---
+# --- HELPER FUNCTION (Safe Alphanumeric Code) ---
 def generate_code():
-    # Yeh hamesha 12 characters ka pure letters aur numbers ka code banayega, koi '_' nahi aayega
     chars = string.ascii_letters + string.digits
     return "".join(secrets.choice(chars) for _ in range(12))
 
@@ -50,14 +55,12 @@ async def start_handler(client, message):
     user_id = message.from_user.id
     text_args = message.text.split()
     
-    # Deep Linking Parsing (Link handle karna)
+    # Deep Linking Handling (Sari public ke liye open hai)
     if len(text_args) > 1:
         raw_code = text_args[1]
-        code = raw_code.strip() # Kisi bhi extra space ko hatane ke liye
+        code = raw_code.strip()
         
-        # Database me code check karna
         file_data = await files_col.find_one({"code": code})
-        
         if not file_data:
             await message.reply_text("❌ Link invalid hai ya file delete ho chuki hai.")
             return
@@ -74,11 +77,10 @@ async def start_handler(client, message):
                     from_chat_id=CHANNEL_ID,
                     message_id=int(f_id)
                 )
-                await asyncio.sleep(0.6) # Anti-flood delay to prevent crash
+                await asyncio.sleep(0.6)
             except Exception as e:
                 print(f"Error forwarding file: {e}")
                 
-        # Bulk File Split Integration
         if next_part_code:
             next_link = f"https://t.me/{BOT_USERNAME}?start={next_part_code}"
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("⏩ Get Next Part Files", url=next_link)]])
@@ -101,6 +103,51 @@ async def start_handler(client, message):
         await show_main_menu(client, message, user_id)
 
 
+# --- SECURED ADMIN VERIFY COMMAND (/a userid) ---
+@bot.on_message(filters.command("a") & filters.private)
+async def verify_user_handler(client, message):
+    sender_id = message.from_user.id
+    
+    # CRITICAL SECURITY CHECK: Srif aapki ID (7559016251) check hogi
+    if sender_id != OWNER_ID:
+        await message.reply_text("❌ **Access Denied!** Aap admin/owner nahi hain. Yeh command srif main owner run kar sakta hai.")
+        return
+        
+    text_args = message.text.split()
+    if len(text_args) < 2:
+        await message.reply_text("❌ Sahi format use karein: `/a target_user_id`")
+        return
+        
+    try:
+        target_id = int(text_args[1])
+    except ValueError:
+        await message.reply_text("❌ Invalid User ID. ID hamesha number hota hai.")
+        return
+        
+    # Check if user exists in DB
+    user = await users_col.find_one({"user_id": target_id})
+    if not user:
+        await message.reply_text("❌ Yeh user database me nahi mila.")
+        return
+        
+    if user.get("status") == "verified":
+        await message.reply_text("⚠️ Yeh user pehle se hi verified hai.")
+        return
+        
+    # Database me status 'verified' set karna
+    await users_col.update_one({"user_id": target_id}, {"$set": {"status": "verified"}})
+    await message.reply_text(f"✅ User `{target_id}` ko successfully verify kar diya gaya hai!")
+    
+    # User ko private me chat par message notify karna
+    try:
+        await client.send_message(
+            chat_id=target_id,
+            text="🎉 **Aapka account admin dwara verify kar diya gaya hai!**\nAb aap files upload kar sakte hain. Main menu dekhne ke liye `/start` karein."
+        )
+    except Exception as e:
+        await message.reply_text(f"⚠️ User verified ho gaya, par use bot block karne ki wajah se message nahi jaa saka: {e}")
+
+
 # --- CALLBACK QUERY HANDLERS ---
 
 @bot.on_callback_query()
@@ -113,7 +160,8 @@ async def callback_handler(client, callback_query):
     if data == "create_account":
         user = await users_col.find_one({"user_id": user_id})
         if not user:
-            await users_col.insert_one({"user_id": user_id, "links": []})
+            # Status default 'unverified' set hoga
+            await users_col.insert_one({"user_id": user_id, "links": [], "status": "unverified"})
             await message.reply_text("🎉 Account successfully ban gaya!")
         await show_main_menu(client, message, user_id, is_callback=False)
 
@@ -168,6 +216,17 @@ async def callback_handler(client, callback_query):
 async def bulk_end_handler(client, message):
     user_id = message.from_user.id
     
+    user = await users_col.find_one({"user_id": user_id})
+    if user and user.get("status") == "unverified":
+        username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
+        log_text = f"key user ({username})\nUser id({user_id})\nNa file upload karan key kosis key"
+        try: await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
+        except Exception as e: print(f"Log Group Error: {e}")
+        
+        await message.reply_text(f"❌ you need to connect admin for approval \nUsername ho {ADMIN_USERNAME}")
+        if user_id in user_states: del user_states[user_id]
+        return
+
     if user_id not in user_states or user_states[user_id]["state"] != "waiting_bulk":
         await message.reply_text("❌ Aap bulk upload mode me nahi hain.")
         return
@@ -179,7 +238,6 @@ async def bulk_end_handler(client, message):
         
     status_msg = await message.reply_text("⏳ Processing aur split links generate kiye jaa rhe hain...")
     
-    # 50-50 files chunk logic
     chunks = [all_files[i:i + 50] for i in range(0, len(all_files), 50)]
     previous_code = None
     first_share_link = ""
@@ -201,7 +259,7 @@ async def bulk_end_handler(client, message):
     
     await status_msg.delete()
     await message.reply_text(
-        f"✅ **Bulk Link Generated! (Total Parts: {len(chunks)})**\n\n🔗 **Main Link:** {first_share_link}\n\n*Note: Is link se user ko pehle 50 files milengi, fir wahan 'Next Part' ka button automatic aa jayega.*",
+        f"✅ **Bulk Link Generated!**\n\n🔗 **Main Link:** {first_share_link}",
         disable_web_page_preview=True
     )
     await show_main_menu(client, message, user_id)
@@ -213,6 +271,20 @@ async def file_receiver_handler(client, message):
     user = await users_col.find_one({"user_id": user_id})
     if not user:
         await message.reply_text("⚠️ Pehle `/start` karke account create karein.")
+        return
+
+    # UNVERIFIED USERS LOCK
+    if user.get("status") == "unverified":
+        username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
+        
+        log_text = f"key user ({username})\nUser id({user_id})\nNa file upload karan key kosis key"
+        try:
+            await client.send_message(chat_id=LOG_GROUP_ID, text=log_text)
+        except Exception as e:
+            print(f"Log Group Notification Error: {e}")
+            
+        await message.reply_text(f"❌ you need to connect admin for approval \nUsername ho {ADMIN_USERNAME}")
+        if user_id in user_states: del user_states[user_id]
         return
 
     if user_id not in user_states:
@@ -242,7 +314,7 @@ async def file_receiver_handler(client, message):
         current_count = len(state_data["bulk_files"])
         
         if current_count % 50 == 0:
-            await message.reply_text(f"📥 **{current_count} Files Receive Ho Chuki Hain!**\nYeh Part 50 complete ho gaya hai, aap bli files bhejna jaari rakh sakte hain. Khatam karne ke liye `/end` dabayein.")
+            await message.reply_text(f"📥 **{current_count} Files Receive Ho Chuki Hain!**\nKhatam karne ke liye `/end` dabayein.")
         else:
             await message.reply_text(f"📥 File received ({current_count}). Aur bhejein ya `/end` karein.")
 
