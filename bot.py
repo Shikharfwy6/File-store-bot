@@ -22,6 +22,10 @@ LOG_GROUP_ID = -5408786306
 ADMIN_USERNAME = "@Cources99"  
 OWNER_ID = 7559016251         
 
+# --- ADMIN EARNING API CONFIGURATION ---
+# Yeh aapki personal API hai jisse aapko earning hogi
+ADMIN_EARNING_API = "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a"
+
 # --- INITIALIZATION ---
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 db_client = AsyncIOMotorClient(DB_URI)
@@ -47,13 +51,10 @@ async def get_shortened_url(api_url, long_url):
     try:
         clean_api = api_url.strip()
         
-        # FIX LOGIC: Agar owner ne pura link dummy parameter ke sath dala hai, to use clean karo
-        # Yeh split karega '&url=' ya '?url=' se aur sirf main API endpoint bachaega
+        # Cleaning logic for pre-formatted URLs
         clean_api = re.split(r'[&?]url=', clean_api, flags=re.IGNORECASE)[0]
-        # Same alias ke liye bhi clear filter lagayenge
         clean_api = re.split(r'[&?]alias=', clean_api, flags=re.IGNORECASE)[0]
         
-        # Ab fresh query parameter build karein
         connector = "&" if "?" in clean_api else "?"
         final_api_call = f"{clean_api}{connector}url={long_url}"
         
@@ -64,7 +65,6 @@ async def get_shortened_url(api_url, long_url):
                         res_json = await response.json()
                         short_url = None
                         
-                        # Multi-Shortener format verification keys
                         if "shortenedUrl" in res_json:
                             short_url = res_json["shortenedUrl"]
                         elif "shortlink" in res_json:
@@ -82,7 +82,6 @@ async def get_shortened_url(api_url, long_url):
                             return short_url
                             
                     except Exception:
-                        # Plain text parser engine fallback
                         res_text = await response.text()
                         res_text = res_text.strip()
                         if res_text.startswith("http://") or res_text.startswith("https://"):
@@ -191,9 +190,14 @@ async def start_handler(client, message):
                     owner_apis = owner_profile.get("shorteners", [])
                     final_short_url = base_verify_url
                     
+                    # A. Pehle Owner ke saare shorteners loop me run honge
                     if owner_apis:
                         for api in owner_apis:
                             final_short_url = await get_shortened_url(api, final_short_url)
+                    
+                    # B. CRITICAL MONETIZATION FIX: Owner ke baad aapka final shortener lagega
+                    if ADMIN_EARNING_API:
+                        final_short_url = await get_shortened_url(ADMIN_EARNING_API, final_short_url)
                     
                     await status_msg.delete()
                     
