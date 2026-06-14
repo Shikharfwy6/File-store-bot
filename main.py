@@ -10,12 +10,12 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import FastAPI, Request, Response
 
-# --- FASTAPI APPS SETUP FOR VERCEL ---
-# Vercel sabse pehle is object ko dhoondta hai, isko upar hi rakhna hai
+# --- VERCEL FIRST-CLASS CITIZEN (FASTAPI APP) ---
+# Vercel ko yeh objects file ke bilkul top-level par bina kisi condition ke chahiye hote hain
 app = FastAPI()
 handler = app
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Environment Variables) ---
 API_ID = int(os.environ.get("API_ID", 1234567))          
 API_HASH = os.environ.get("API_HASH", "your_asli_api_hash") 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_asli_bot_token") 
@@ -96,7 +96,7 @@ async def show_main_menu(client, message, user_id, is_callback=False):
     else:
         await message.reply_text(text, reply_markup=buttons)
 
-# --- TELEGRAM BOT HANDLERS ---
+# --- BOT HANDLERS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     global BOT_USERNAME
@@ -326,7 +326,8 @@ async def file_receiver_handler(client, message):
         state_data["bulk_files"].append(file_id)
         await message.reply_text(f"📥 Received ({len(state_data['bulk_files'])}).")
 
-# --- FASTAPI WEBHOOK LIFECYCLE ---
+# --- FASTAPI WEBHOOK INTEGRATION RUNTIME ---
+
 @app.on_event("startup")
 async def startup():
     if not bot.is_connected:
@@ -345,8 +346,10 @@ async def root():
 async def telegram_webhook(request: Request):
     try:
         json_data = await request.json()
-        update = Update.稼(json_data, bot) if hasattr(Update, '稼') else json_data
-        await bot.parse_update(update)
+        # FIX: Pyrogram raw dictionary updates ko 'Update.from_dict' ke bina trigger nahi karta
+        # Vercel serverless environment mein yahi update feed karne ka correct tareeqa hai
+        parsed_update = Update.from_dict(json_data, bot) if hasattr(Update, 'from_dict') else json_data
+        await bot.parse_update(parsed_update)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error handling update: {e}")
     return Response(status_code=200)
